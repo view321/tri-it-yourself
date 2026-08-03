@@ -253,6 +253,34 @@ It ranks categorical choices by best *and* mean, and for each numeric knob print
 quartile occupies. A knob whose winners cover most of the searched range is marked `UNRESOLVED`: the
 study did not determine it, however decisive the best value looks.
 
+## When the memory saving is worth anything
+
+`sign` and `ste` deploy identically at 2 bits and run at similar speed. The only thing `sign` buys is
+training state: 18 bits/weight against 64. That is worth money **only when memory is what forces your
+device count** — and often it isn't.
+
+| ternary params whose optimizer state fits one 32 GB chip | |
+|---|---|
+| `ste` (fp32 latent + fp32 momentum) | 2.5B |
+| `sign` (fp16 momentum) | **8.9B** |
+| `sign` (int8 momentum) | **16B** |
+
+So on a fixed small number of devices, `sign` raises the model-size ceiling ~3.6×. That is the real
+claim, and it is a claim about *who can train what on what they already have*, not about cost per FLOP.
+
+Two places it evaporates:
+
+- **Below the ceiling.** At 305M params (`wide`), `ste` state is 2.5 GB and `sign` is 1.1 GB on a
+  32 GB chip. Activations dominate; neither binds; the saving buys nothing.
+- **On a cluster.** Sharding optimizer state across N devices divides `ste`'s penalty by N. For a 3B
+  ternary model, `ste` needs 24 GB/chip at N=1 but only 3 GB/chip at N=8. If you already rent 8 chips
+  for compute, `ste`'s memory cost is amortized to nothing and `sign` saves you nothing.
+
+The asymmetry that matters: **memory you don't use is free, but compute is always paid.** If `sign`
+needs more tokens than `ste` to reach the same loss, that is a real cost in every regime, traded
+against a saving that only materializes in one. `tri.report` prints seconds per trial next to the
+quality numbers so both sides are visible.
+
 ## The comparison that actually matters
 
 Beating an unquantized `bf16` model was never the goal, and expecting it would be strange — more
