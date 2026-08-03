@@ -234,9 +234,58 @@ def report(path: str, top: int = 8, uniform: float | None = None,
     return s
 
 
+def compare(paths: list[str], uniform: float | None = None) -> list[dict]:
+    """Rank several studies side by side, e.g. one per --fix-quant arm.
+
+    Reports the top-quartile median next to the best, because a single best
+    trial is the statistic most likely to be luck - and two studies of the same
+    task here have already disagreed on their winner.
+    """
+    import os
+
+    rows = []
+    for p in paths:
+        with open(p) as f:
+            s = json.load(f)
+        done = _completed(s.get("trials", []))
+        if not done:
+            print(f"  {os.path.basename(p)}: no completed trials")
+            continue
+        done.sort(key=lambda t: t["val_ce"])
+        k = min(len(done), max(3, len(done) // 4))
+        rows.append({
+            "name": os.path.basename(p).replace("_summary.json", ""),
+            "best": done[0]["val_ce"],
+            "top_median": done[k // 2]["val_ce"],
+            "completed": len(done),
+            "total": len(s.get("trials", [])),
+            "params": done[0]["params"],
+        })
+    rows.sort(key=lambda r: r["best"])
+    w = max((len(r["name"]) for r in rows), default=4)
+    print(f"  {'study':<{w}}  {'best':>8}  {'topQ med':>9}  {'trials':>12}")
+    for r in rows:
+        extra = ""
+        if uniform:
+            extra = f"   ({uniform - r['best']:.2f} nats below uniform)"
+        print(f"  {r['name']:<{w}}  {r['best']:>8.4f}  {r['top_median']:>9.4f}  "
+              f"{r['completed']:>4}/{r['total']:<7}{extra}")
+    if len(rows) > 1:
+        gap = rows[1]["best"] - rows[0]["best"]
+        spread = max(r["top_median"] - r["best"] for r in rows)
+        print(f"\n  gap between the best two: {gap:.4f}")
+        print(f"  widest best-to-top-quartile spread within one study: {spread:.4f}")
+        if gap < spread:
+            print("  the arms are separated by less than the within-study noise:"
+                  " NOT a ranking")
+    for r in rows:
+        print(f"\n  {r['name']} best params: {r['params']}")
+    return rows
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Summarize a tri.ablate study")
-    ap.add_argument("summary", help="path to <study>_summary.json")
+    ap.add_argument("summary", nargs="+", help="path(s) to <study>_summary.json")
     ap.add_argument("--top", type=int, default=8)
     ap.add_argument("--uniform", type=float, default=None,
                     help="ln(vocab_size) to report nats-below-uniform, e.g. 10.3972")
@@ -244,7 +293,10 @@ def main(argv=None):
                     help="best val_ce per cell of two categoricals, e.g. "
                          "--cross sign_rule sign_precondition")
     args = ap.parse_args(argv)
-    report(args.summary, args.top, args.uniform, args.cross)
+    if len(args.summary) > 1:
+        compare(args.summary, args.uniform)
+    else:
+        report(args.summary[0], args.top, args.uniform, args.cross)
 
 
 if __name__ == "__main__":

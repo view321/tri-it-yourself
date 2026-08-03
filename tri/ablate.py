@@ -49,6 +49,32 @@ def check_objective_is_learnable(preset: str, dataset: str | None) -> None:
         )
 
 
+def report_active_groups(preset: str, quant: str | None) -> dict:
+    """Print how many parameters each optimizer group actually owns.
+
+    A group with zero parameters makes its whole family of hyperparameters
+    inert: in `sign` mode every block linear is ternary, so the Muon group is
+    empty and muon_lr does nothing.  Searching it anyway costs budget and the
+    result then reads like a tuned value.
+    """
+    import jax
+
+    from .model import init_params, param_labels
+    from .optim import group_sizes
+
+    mc, _, oc = build_configs(preset, {"quant": quant}, {}, {})
+    params = init_params(jax.random.PRNGKey(0), mc)
+    sizes = group_sizes(params, param_labels(params, mc, oc.muon_on_latent))
+    live = {g: n for g, n in sizes.items() if n}
+    dead = [g for g, n in sizes.items() if not n]
+    print(
+        f"optimizer groups for quant={mc.quant}: "
+        + ", ".join(f"{g}={n/1e6:.2f}M" for g, n in live.items())
+        + (f"  |  empty: {', '.join(dead)}" if dead else "")
+    )
+    return sizes
+
+
 def _preserve_existing(path: str) -> str | None:
     """Move an existing summary aside instead of overwriting it.
 
@@ -116,8 +142,11 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
         "sign_b2": trial.suggest_float("sign_b2", 0.0, 0.999, log=False),
         "sign_normalize": trial.suggest_categorical("sign_normalize", ["rms", "absmean"]),
         "sign_precondition": trial.suggest_categorical("sign_precondition", ["none", "orthogonal"]),
-        "adam_lr": trial.suggest_float("adam_lr", 3e-4, 1e-2, log=True),
-        "muon_lr": trial.suggest_float("muon_lr", 2e-3, 1e-1, log=True),
+        # No muon_lr here.  In `sign` mode every block linear is ternary, so the
+        # Muon group is empty and muon_lr cannot affect the objective - an
+        # earlier study searched it anyway and burned an eighth of its budget on
+        # a parameter with no effect.
+        "adam_lr": trial.suggest_float("adam_lr", 3e-4, 2e-2, log=True),
     }
     if rule == "bop":
         # bop flips when eta*|u| > threshold, so eta and threshold are
@@ -136,23 +165,31 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
     return space
 
 
-def _modes_space(trial) -> tuple[dict, dict]:
-    quant = trial.suggest_categorical("quant", ["bf16", "ste", "sign"])
-    optim = {"adam_lr": trial.suggest_float("adam_lr", 3e-4, 1e-2, log=True)}
+def _modes_space(trial, fix_quant: str | None = None) -> tuple[dict, dict]:
+    """Each arm searches only the knobs that are live for it.
+
+    `sign` mode makes every block linear ternary, so its Muon group is empty and
+    muon_lr is inert; `bf16`/`ste` keep float matrices and have no sign knobs.
+    Searching a dead parameter wastes budget and then reads as a tuned result.
+    """
+    quant = fix_quant or trial.suggest_categorical("quant", ["bf16", "ste", "sign"])
+    optim = {"adam_lr": trial.suggest_float("adam_lr", 3e-4, 2e-2, log=True)}
     if quant == "sign":
         optim["sign_step"] = trial.suggest_float("sign_step", 3e-3, 5e-1, log=True)
         optim["sign_b1"] = trial.suggest_float("sign_b1", 0.0, 0.98)
+        # b2 earned its place: its winners pinned against every bound it was given.
+        optim["sign_b2"] = trial.suggest_float("sign_b2", 0.0, 0.999)
     else:
         optim["muon_lr"] = trial.suggest_float("muon_lr", 2e-3, 1e-1, log=True)
     return {"quant": quant}, optim
 
 
-def _study_fn(study: str, trial, fix_rule: str | None = None):
+def _study_fn(study: str, trial, fix_rule: str | None = None, fix_quant: str | None = None):
     """Return (model_overrides, train_overrides, optim_overrides) for a trial."""
     if study == "sign":
         return {"quant": "sign"}, {}, _sign_space(trial, fix_rule)
     if study == "modes":
-        m, o = _modes_space(trial)
+        m, o = _modes_space(trial, fix_quant)
         return m, {}, o
     if study == "loops":
         loops = trial.suggest_categorical("n_loops", [1, 2, 3, 4])
@@ -198,6 +235,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--fix-rule", default=None, choices=["stoch_round", "stoch_flip", "bop"],
                     help="pin sign_rule so each rule can be tuned on an equal budget; "
                          "TPE otherwise starves whichever rule loses early")
+    ap.add_argument("--fix-quant", default=None, choices=["bf16", "ste", "sign"],
+                    help="pin the weight mode for a `modes` study; run one study per "
+                         "arm so each gets an equal budget rather than TPE's allocation")
     ap.add_argument("--storage", default=None, help="e.g. sqlite:///runs/ablate/study.db")
     ap.add_argument("--eval-every", type=int, default=None)
     ap.add_argument("--time-budget-s", type=float, default=0.0, help="per trial")
@@ -215,6 +255,7 @@ def main(argv=None):
         raise SystemExit("`pip install optuna` to run ablations") from e
 
     check_objective_is_learnable(args.preset, args.dataset)
+    report_active_groups(args.preset, args.fix_quant or ("sign" if args.study != "modes" else None))
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     os.makedirs(args.out_dir, exist_ok=True)
     tag = f"-{args.tag}" if args.tag else ""
@@ -240,7 +281,7 @@ def main(argv=None):
     t0 = time.time()
 
     def objective(trial):
-        model_o, train_o, optim_o = _study_fn(args.study, trial, args.fix_rule)
+        model_o, train_o, optim_o = _study_fn(args.study, trial, args.fix_rule, args.fix_quant)
         train_o = dict(train_o)
         train_o.update(
             {

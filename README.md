@@ -210,12 +210,25 @@ finishes, use `--dataset induction` — a real signal with a known floor, and no
 | study | question |
 |---|---|
 | `sign` | flip rule, step size, momentum betas, orthogonal preconditioning |
-| `modes` | `bf16` vs `ste` vs `sign`, each with its own LR tuned under the same trial budget |
+| `modes` | `bf16` vs `ste` vs `sign`, each pinned with `--fix-quant` and tuned on an equal budget |
 | `loops` | quality vs loop count, with a compute-matched control |
 | `momentum` | val loss per bit of optimizer state |
 
 `modes` deliberately gives each arm its own tuned learning rate. Comparing arms at one shared LR only
-measures which arm happened to like that LR.
+measures which arm happened to like that LR. Pin the arm and run one study each, then compare:
+
+```bash
+for q in bf16 ste sign; do
+  python -m tri.ablate --study modes --fix-quant $q --tag $q --trials 12 --steps 3000 \
+      --preset tiny --dataset bin --data-dir data
+done
+python -m tri.report runs/ablate/modes-{bf16,ste,sign}_summary.json --uniform 10.3972
+```
+
+Each arm searches only the knobs that are live for it: `sign` has no Muon group (every block linear is
+ternary) so `muon_lr` is inert there, and `bf16`/`ste` have no sign knobs. Searching a dead parameter
+wastes budget and then reads like a tuned result — `tri.ablate` prints the per-group parameter counts
+at startup so an empty group is visible before you spend hours on it.
 
 **A TPE study optimizes; it does not compare.** Once a categorical value loses a few early trials,
 TPE stops spending budget on it, so it never gets a fair test — in one 40-trial run `stoch_round` was

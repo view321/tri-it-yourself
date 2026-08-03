@@ -259,3 +259,67 @@ def test_non_bop_rules_still_search_the_step(tmp_path):
                    n_trials=5)
     assert len({s["sign_step"] for s in seen}) > 1
     assert all("sign_threshold" not in s for s in seen)
+
+
+def test_modes_arms_only_search_their_live_knobs():
+    """muon_lr is inert in sign mode (empty Muon group); sign knobs are inert otherwise."""
+    optuna = pytest.importorskip("optuna")
+    from tri.ablate import _modes_space
+
+    for quant, want, unwanted in [
+        ("sign", {"sign_step", "sign_b1", "sign_b2"}, {"muon_lr"}),
+        ("bf16", {"muon_lr"}, {"sign_step", "sign_b1", "sign_b2"}),
+        ("ste", {"muon_lr"}, {"sign_step", "sign_b1", "sign_b2"}),
+    ]:
+        seen = []
+        st = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
+        st.optimize(lambda t: (seen.append(_modes_space(t, fix_quant=quant)), 1.0)[1], n_trials=3)
+        keys = set(seen[0][1])
+        assert want <= keys, (quant, keys)
+        assert not (unwanted & keys), (quant, keys)
+        assert all("quant" not in t.params for t in st.trials)  # pinned, not searched
+
+
+def test_sign_space_no_longer_searches_the_inert_muon_lr():
+    optuna = pytest.importorskip("optuna")
+    from tri.ablate import _sign_space
+
+    seen = []
+    st = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
+    st.optimize(lambda t: (seen.append(_sign_space(t)), 1.0)[1], n_trials=3)
+    assert all("muon_lr" not in s for s in seen)
+
+
+def test_compare_calls_out_arms_closer_than_the_noise(tmp_path, capsys):
+    """Two arms separated by less than within-study spread are not a ranking."""
+    from tri.report import compare
+
+    def write(name, ces):
+        rows = [{"trial": i, "val_ce": c, "pruned": False,
+                 "params": {"adam_lr": 0.001}} for i, c in enumerate(ces)]
+        p = tmp_path / f"{name}_summary.json"
+        p.write_text(json.dumps({"study": "modes", "trials": rows,
+                                 "best_value": min(ces), "best_params": {}}))
+        return str(p)
+
+    a = write("sign", [5.10, 5.40, 5.60, 5.90])   # spread 0.30 within arm
+    b = write("bf16", [5.12, 5.45, 5.70, 6.00])   # gap between arms only 0.02
+    compare([a, b])
+    out = capsys.readouterr().out
+    assert "NOT a ranking" in out
+
+
+def test_compare_stays_quiet_when_the_gap_is_real(tmp_path, capsys):
+    from tri.report import compare
+
+    def write(name, ces):
+        rows = [{"trial": i, "val_ce": c, "pruned": False, "params": {}} for i, c in enumerate(ces)]
+        p = tmp_path / f"{name}_summary.json"
+        p.write_text(json.dumps({"study": "modes", "trials": rows,
+                                 "best_value": min(ces), "best_params": {}}))
+        return str(p)
+
+    a = write("sign", [4.00, 4.02, 4.03, 4.05])
+    b = write("bf16", [6.00, 6.02, 6.03, 6.05])
+    compare([a, b])
+    assert "NOT a ranking" not in capsys.readouterr().out
