@@ -228,3 +228,21 @@ def test_rejects_bad_config():
         stochastic_sign(0.1, rule="nope")
     with pytest.raises(ValueError):
         stochastic_sign(0.1, momentum_dtype="float8")
+
+
+@pytest.mark.parametrize("b2", [0.0, 0.51, 0.999])
+def test_momentum_decay_endpoints_are_valid(b2):
+    """b2=0 means "no memory" and must stay a legal config, not a divide-by-zero.
+
+    The search range floors at 0 for this reason; an earlier 0.9 floor had the
+    study's winners pinned against it.
+    """
+    params = ternary_params((32, 32))
+    tx = stochastic_sign(0.05, b1=0.7, b2=b2)
+    state = tx.init(params)
+    g = {"w": jnp.ones((32, 32), jnp.float32)}
+    for _ in range(6):
+        upd, state = tx.update(g, state, params)
+        params = optax.apply_updates(params, upd)
+    assert set(np.unique(np.asarray(params["w"])).tolist()) <= {-1, 0, 1}
+    assert float(jnp.mean(params["w"])) < 0.0  # still tracks the gradient

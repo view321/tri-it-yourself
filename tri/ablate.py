@@ -109,12 +109,16 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
     )
     space = {
         "sign_rule": rule,
-        "sign_step": trial.suggest_float("sign_step", 3e-3, 5e-1, log=True),
+        # Lower bound dropped a decade: `stoch_round` can move two lattice
+        # points in one step when eta*|u| is large, so it plausibly needs a much
+        # smaller step than `stoch_flip`, which moves at most one.  Flooring the
+        # range at 3e-3 would handicap it in a rule comparison.
+        "sign_step": trial.suggest_float("sign_step", 3e-4, 5e-1, log=True),
         "sign_b1": trial.suggest_float("sign_b1", 0.0, 0.98),
-        # Widened downward: at `tiny`/3000 steps the winning b2 values pinned
-        # against a 0.9 lower bound, so the optimum was outside the interval.
-        # Short momentum memory suits a noisy flip process.
-        "sign_b2": trial.suggest_float("sign_b2", 0.5, 0.999, log=False),
+        # [0, 1) is the natural domain of an EMA decay and there is no principled
+        # reason to exclude the short-memory end; b2=0 simply means "no memory".
+        # An earlier 0.9 floor had the winners pinned against it.
+        "sign_b2": trial.suggest_float("sign_b2", 0.0, 0.999, log=False),
         "sign_normalize": trial.suggest_categorical("sign_normalize", ["rms", "absmean"]),
         "sign_precondition": trial.suggest_categorical("sign_precondition", ["none", "orthogonal"]),
         "adam_lr": trial.suggest_float("adam_lr", 3e-4, 1e-2, log=True),
