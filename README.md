@@ -141,6 +141,32 @@ changes. A **v6e-1** (918 bf16 TFLOPS, 32 GB) is roughly 4× an RTX 5090 at the 
 turns the 2-day run into something closer to twelve hours; a **v5e-1** (197 TFLOPS, 16 GB) is about
 5090-equivalent on compute, so halve `--batch-size` and double `--grad-accum` to hold tokens/step.
 
+Each TPU generation has its own VM image. `tpu-ubuntu2204-base` is **v4 and older** — using it on a
+v5e/v6e is the easy mistake here:
+
+| TPU | `--version` | `--accelerator-type` |
+|---|---|---|
+| v6e | `v2-alpha-tpuv6e` | `v6e-1` |
+| v5e | `v2-alpha-tpuv5-lite` | `v5litepod-1` |
+| v5p | `v2-alpha-tpuv5` | — |
+| v4 and older | `tpu-ubuntu2204-base` | — |
+
+```bash
+gcloud alpha compute tpus tpu-vm create tri-v6e \
+    --zone="$ZONE" --project="$PROJECT" \
+    --accelerator-type=v6e-1 --version=v2-alpha-tpuv6e
+
+gcloud compute tpus tpu-vm ssh tri-v6e --zone="$ZONE"
+pip install -U "jax[tpu]"          # stable no longer needs the libtpu find-links URL
+python -c "import jax; print(jax.devices())"
+pip install -e ".[data,tune]"
+```
+
+Confirm the accelerator string for your zone with
+`gcloud compute tpus accelerator-types list --zone="$ZONE"` rather than trusting the table — the
+naming has changed between generations. TPU v6e needs **JAX ≥ 0.4.37**, which this project's floor of
+0.4.38 already satisfies.
+
 ```bash
 python -m tri.train --preset main --quant sign --dataset bin --data-dir data \
     --device-tflops 918 --ckpt-every 500 --resume auto
