@@ -217,6 +217,18 @@ finishes, use `--dataset induction` — a real signal with a known floor, and no
 `modes` deliberately gives each arm its own tuned learning rate. Comparing arms at one shared LR only
 measures which arm happened to like that LR.
 
+**A TPE study optimizes; it does not compare.** Once a categorical value loses a few early trials,
+TPE stops spending budget on it, so it never gets a fair test — in one 40-trial run `stoch_round` was
+drawn 5 times, lost all 5, and was then effectively abandoned. That is evidence it starts badly, not
+evidence it is worse. To actually rank the flip rules, pin each one and give it an equal budget:
+
+```bash
+for r in stoch_round stoch_flip bop; do
+  python -m tri.ablate --study sign --fix-rule $r --tag $r --trials 12 --steps 3000 \
+      --preset tiny --dataset bin --data-dir data
+done
+```
+
 Read the result with `tri.report` rather than trusting the single best trial — with eight knobs and a
 few dozen trials, the winner is partly luck:
 

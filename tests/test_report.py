@@ -149,3 +149,33 @@ def test_failed_trials_are_counted_not_silently_dropped(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "1 failed" in out
     assert "0 survived of 1 sampled" in out and "failed" in out
+
+
+def test_fix_rule_pins_the_rule_and_removes_it_from_the_search(tmp_path):
+    """Equal-budget comparison needs the rule fixed, not sampled by TPE."""
+    optuna = pytest.importorskip("optuna")
+    from tri.ablate import _sign_space
+
+    seen = {}
+
+    def objective(trial):
+        seen[trial.number] = _sign_space(trial, fix_rule="stoch_round")
+        return 1.0
+
+    study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
+    study.optimize(objective, n_trials=4)
+
+    assert all(s["sign_rule"] == "stoch_round" for s in seen.values())
+    # the rule must not be a searched dimension when pinned
+    assert all("sign_rule" not in t.params for t in study.trials)
+    # the rest of the space is still explored
+    assert len({s["sign_step"] for s in seen.values()}) > 1
+
+
+def test_unpinned_sign_space_still_searches_the_rule():
+    optuna = pytest.importorskip("optuna")
+    from tri.ablate import _sign_space
+
+    study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
+    study.optimize(lambda t: (_sign_space(t), 1.0)[1], n_trials=6)
+    assert all("sign_rule" in t.params for t in study.trials)

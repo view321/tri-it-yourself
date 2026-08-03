@@ -99,8 +99,14 @@ def run_trial(
 # -- search spaces -----------------------------------------------------
 
 
-def _sign_space(trial) -> dict:
-    rule = trial.suggest_categorical("sign_rule", ["stoch_round", "stoch_flip", "bop"])
+def _sign_space(trial, fix_rule: str | None = None) -> dict:
+    # TPE allocates samples to whatever is winning, so a rule that loses its
+    # first few draws gets tried less and never receives a fair test.  Pinning
+    # the rule and giving each one its own study is the only way to compare
+    # them on equal budget.
+    rule = fix_rule or trial.suggest_categorical(
+        "sign_rule", ["stoch_round", "stoch_flip", "bop"]
+    )
     space = {
         "sign_rule": rule,
         "sign_step": trial.suggest_float("sign_step", 3e-3, 5e-1, log=True),
@@ -130,10 +136,10 @@ def _modes_space(trial) -> tuple[dict, dict]:
     return {"quant": quant}, optim
 
 
-def _study_fn(study: str, trial):
+def _study_fn(study: str, trial, fix_rule: str | None = None):
     """Return (model_overrides, train_overrides, optim_overrides) for a trial."""
     if study == "sign":
-        return {"quant": "sign"}, {}, _sign_space(trial)
+        return {"quant": "sign"}, {}, _sign_space(trial, fix_rule)
     if study == "modes":
         m, o = _modes_space(trial)
         return m, {}, o
@@ -178,6 +184,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "(5090 209.5 | TPU v5e 197 | TPU v6e 918 | A100 312 | H100 989)")
     ap.add_argument("--out-dir", default="runs/ablate")
     ap.add_argument("--tag", default="", help="suffix separating this study's outputs from earlier ones")
+    ap.add_argument("--fix-rule", default=None, choices=["stoch_round", "stoch_flip", "bop"],
+                    help="pin sign_rule so each rule can be tuned on an equal budget; "
+                         "TPE otherwise starves whichever rule loses early")
     ap.add_argument("--storage", default=None, help="e.g. sqlite:///runs/ablate/study.db")
     ap.add_argument("--eval-every", type=int, default=None)
     ap.add_argument("--time-budget-s", type=float, default=0.0, help="per trial")
@@ -220,7 +229,7 @@ def main(argv=None):
     t0 = time.time()
 
     def objective(trial):
-        model_o, train_o, optim_o = _study_fn(args.study, trial)
+        model_o, train_o, optim_o = _study_fn(args.study, trial, args.fix_rule)
         train_o = dict(train_o)
         train_o.update(
             {
