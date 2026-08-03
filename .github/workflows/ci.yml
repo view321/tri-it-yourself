@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install (CPU JAX)
+        run: |
+          python -m pip install -U pip
+          pip install "jax[cpu]" -e ".[dev]"
+      - name: Test
+        run: python -m pytest -q
+      - name: Smoke train (all three weight modes)
+        run: |
+          python -m tri.train --preset smoke --quant sign  --steps 60 --out-dir /tmp/runs
+          python -m tri.train --preset smoke --quant ste   --steps 60 --out-dir /tmp/runs
+          python -m tri.train --preset smoke --quant bf16  --steps 60 --out-dir /tmp/runs
