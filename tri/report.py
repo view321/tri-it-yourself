@@ -253,23 +253,27 @@ def compare(paths: list[str], uniform: float | None = None) -> list[dict]:
             continue
         done.sort(key=lambda t: t["val_ce"])
         k = min(len(done), max(3, len(done) // 4))
+        walls = [t["wall_s"] for t in done if t.get("wall_s")]
         rows.append({
             "name": os.path.basename(p).replace("_summary.json", ""),
             "best": done[0]["val_ce"],
             "top_median": done[k // 2]["val_ce"],
             "completed": len(done),
             "total": len(s.get("trials", [])),
+            "wall_s": (sum(walls) / len(walls)) if walls else 0.0,
             "params": done[0]["params"],
         })
     rows.sort(key=lambda r: r["best"])
     w = max((len(r["name"]) for r in rows), default=4)
-    print(f"  {'study':<{w}}  {'best':>8}  {'topQ med':>9}  {'trials':>12}")
+    # Steps (and therefore tokens) are matched across arms; seconds are not, so
+    # the mean trial wall-clock is the cost side of any quality difference.
+    print(f"  {'study':<{w}}  {'best':>8}  {'topQ med':>9}  {'trials':>10}  {'s/trial':>8}")
     for r in rows:
         extra = ""
         if uniform:
             extra = f"   ({uniform - r['best']:.2f} nats below uniform)"
         print(f"  {r['name']:<{w}}  {r['best']:>8.4f}  {r['top_median']:>9.4f}  "
-              f"{r['completed']:>4}/{r['total']:<7}{extra}")
+              f"{r['completed']:>4}/{r['total']:<5}  {r['wall_s']:>8.0f}{extra}")
     if len(rows) > 1:
         gap = rows[1]["best"] - rows[0]["best"]
         spread = max(r["top_median"] - r["best"] for r in rows)
@@ -283,18 +287,80 @@ def compare(paths: list[str], uniform: float | None = None) -> list[dict]:
     return rows
 
 
+def curves(paths: list[str], uniform: float | None = None) -> dict:
+    """Val loss trajectory of each study's best trial, aligned by step.
+
+    A final number says which arm ended lower; it cannot say which got there
+    faster.  The per-eval history is already in each trial's log.jsonl, so this
+    reads the best trial per study and lines the curves up.
+
+    Caveat worth keeping in mind: "best trial" is chosen on *final* loss, which
+    mildly favours configurations that finish strong over ones that start fast.
+    """
+    import os
+
+    series: dict = {}
+    for p in paths:
+        with open(p) as f:
+            s = json.load(f)
+        done = _completed(s.get("trials", []))
+        if not done:
+            continue
+        done.sort(key=lambda t: t["val_ce"])
+        name = os.path.basename(p).replace("_summary.json", "")
+        base = os.path.join(os.path.dirname(p), name)
+        log = os.path.join(base, f"t{done[0]['trial']:03d}", "log.jsonl")
+        if not os.path.exists(log):
+            print(f"  {name}: no log at {log}")
+            continue
+        pts = {}
+        with open(log) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("event") == "eval":
+                    pts[rec["step"]] = rec["val_ce"]
+                elif rec.get("event") == "done" and rec.get("wall_s"):
+                    pts.setdefault("wall_s", rec["wall_s"])
+        series[name] = pts
+
+    if not series:
+        print("  no trajectories found")
+        return series
+    steps = sorted({k for pts in series.values() for k in pts if isinstance(k, int)})
+    names = list(series)
+    w = max(len(n) for n in names)
+    print(f"\nval_ce of each study's best trial, by step")
+    print(f"  {'step':>7}  " + "  ".join(f"{n:>{max(9, len(n))}}" for n in names))
+    for st in steps:
+        cells = [f"{series[n][st]:>{max(9, len(n))}.4f}" if st in series[n]
+                 else f"{'-':>{max(9, len(n))}}" for n in names]
+        print(f"  {st:>7}  " + "  ".join(cells))
+    if uniform:
+        print(f"  (uniform baseline {uniform:.4f})")
+    print("\n  steps and tokens are matched across arms; wall-clock is not.")
+    return series
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Summarize a tri.ablate study")
     ap.add_argument("summary", nargs="+", help="path(s) to <study>_summary.json")
     ap.add_argument("--top", type=int, default=8)
     ap.add_argument("--uniform", type=float, default=None,
                     help="ln(vocab_size) to report nats-below-uniform, e.g. 10.3972")
+    ap.add_argument("--curves", action="store_true",
+                    help="val_ce trajectory of each study's best trial, aligned by step")
     ap.add_argument("--cross", nargs=2, metavar=("A", "B"), default=None,
                     help="best val_ce per cell of two categoricals, e.g. "
                          "--cross sign_rule sign_precondition")
     args = ap.parse_args(argv)
-    if len(args.summary) > 1:
+    if args.curves:
+        curves(args.summary, args.uniform)
+    elif len(args.summary) > 1:
         compare(args.summary, args.uniform)
+        curves(args.summary, args.uniform)
     else:
         report(args.summary[0], args.top, args.uniform, args.cross)
 

@@ -323,3 +323,58 @@ def test_compare_stays_quiet_when_the_gap_is_real(tmp_path, capsys):
     b = write("bf16", [6.00, 6.02, 6.03, 6.05])
     compare([a, b])
     assert "NOT a ranking" not in capsys.readouterr().out
+
+
+def _study_with_logs(tmp_path, name, trajectory, best_ce, wall):
+    """Write a summary plus the per-trial log.jsonl that curves() reads."""
+    import os
+
+    rows = [{"trial": 0, "val_ce": best_ce, "pruned": False, "wall_s": wall,
+             "params": {"adam_lr": 0.001}}]
+    d = tmp_path / name / "t000"
+    os.makedirs(d, exist_ok=True)
+    with open(d / "log.jsonl", "w") as f:
+        for step, ce in trajectory:
+            f.write(json.dumps({"event": "eval", "step": step, "val_ce": ce}) + "\n")
+        f.write(json.dumps({"event": "done", "wall_s": wall}) + "\n")
+    p = tmp_path / f"{name}_summary.json"
+    p.write_text(json.dumps({"study": "modes", "trials": rows,
+                             "best_value": best_ce, "best_params": {}}))
+    return str(p)
+
+
+def test_curves_align_trajectories_across_arms(tmp_path, capsys):
+    """A final number cannot say which arm got there faster; the curve can."""
+    from tri.report import curves
+
+    a = _study_with_logs(tmp_path, "modes-sign", [(500, 7.0), (1000, 5.8), (1500, 5.3)], 5.3, 210)
+    b = _study_with_logs(tmp_path, "modes-bf16", [(500, 8.2), (1000, 6.4), (1500, 5.2)], 5.2, 180)
+    out_series = curves([a, b])
+    out = capsys.readouterr().out
+
+    assert "modes-sign" in out and "modes-bf16" in out
+    assert "7.0000" in out and "8.2000" in out  # sign leads early
+    assert "5.3000" in out and "5.2000" in out  # bf16 ends lower
+    assert set(out_series) == {"modes-sign", "modes-bf16"}
+    assert "wall-clock is not" in out
+
+
+def test_curves_reports_a_missing_log_instead_of_crashing(tmp_path, capsys):
+    from tri.report import curves
+
+    rows = [{"trial": 0, "val_ce": 5.0, "pruned": False, "params": {}}]
+    p = tmp_path / "modes-ste_summary.json"
+    p.write_text(json.dumps({"study": "modes", "trials": rows,
+                             "best_value": 5.0, "best_params": {}}))
+    curves([str(p)])
+    assert "no log at" in capsys.readouterr().out
+
+
+def test_compare_shows_wall_clock_since_only_steps_are_matched(tmp_path, capsys):
+    from tri.report import compare
+
+    a = _study_with_logs(tmp_path, "modes-sign", [(500, 7.0)], 5.30, 260)
+    b = _study_with_logs(tmp_path, "modes-bf16", [(500, 8.2)], 5.20, 180)
+    compare([a, b])
+    out = capsys.readouterr().out
+    assert "s/trial" in out and "260" in out and "180" in out
