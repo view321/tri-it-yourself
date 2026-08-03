@@ -42,7 +42,37 @@ def _fmt(v) -> str:
     return str(v)
 
 
-def report(path: str, top: int = 8, uniform: float | None = None) -> dict:
+def _cross_table(done: list[dict], a: str, b: str) -> None:
+    """Best val_ce per (a, b) cell, with counts.
+
+    Marginal tables hide interactions: a setting can look bad on average while
+    being the best choice for one particular arm.  Counts are printed because
+    most cells in a small study hold one or two trials.
+    """
+    cells: dict = {}
+    for t in done:
+        ka, kb = t["params"].get(a), t["params"].get(b)
+        if ka is None or kb is None:
+            continue
+        cells.setdefault((str(ka), str(kb)), []).append(t["val_ce"])
+    if not cells:
+        print(f"\n(no completed trials carry both {a} and {b})")
+        return
+    rows = sorted({k[0] for k in cells})
+    cols = sorted({k[1] for k in cells})
+    w = max(len(r) for r in rows)
+    print(f"\nbest val_ce by {a} x {b}   (n in parentheses)")
+    print("  " + " " * w + "  " + "  ".join(f"{c:>16}" for c in cols))
+    for r in rows:
+        out = []
+        for c in cols:
+            xs = cells.get((r, c))
+            out.append(f"{min(xs):>10.4f} ({len(xs):>2})" if xs else f"{'-':>16}")
+        print(f"  {r:<{w}}  " + "  ".join(out))
+
+
+def report(path: str, top: int = 8, uniform: float | None = None,
+           cross: tuple[str, str] | None = None) -> dict:
     with open(path) as f:
         s = json.load(f)
     trials = s.get("trials", [])
@@ -116,6 +146,9 @@ def report(path: str, top: int = 8, uniform: float | None = None) -> dict:
                     f"mean={sum(xs)/len(xs):.4f}  {share}/{k} of top{tail}"
                 )
 
+    if cross:
+        _cross_table(done, cross[0], cross[1])
+
     if num:
         print(f"\nnumeric knobs: range occupied by the top {k} trials")
         for p in num:
@@ -163,8 +196,11 @@ def main(argv=None):
     ap.add_argument("--top", type=int, default=8)
     ap.add_argument("--uniform", type=float, default=None,
                     help="ln(vocab_size) to report nats-below-uniform, e.g. 10.3972")
+    ap.add_argument("--cross", nargs=2, metavar=("A", "B"), default=None,
+                    help="best val_ce per cell of two categoricals, e.g. "
+                         "--cross sign_rule sign_precondition")
     args = ap.parse_args(argv)
-    report(args.summary, args.top, args.uniform)
+    report(args.summary, args.top, args.uniform, args.cross)
 
 
 if __name__ == "__main__":

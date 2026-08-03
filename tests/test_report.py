@@ -179,3 +179,28 @@ def test_unpinned_sign_space_still_searches_the_rule():
     study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
     study.optimize(lambda t: (_sign_space(t), 1.0)[1], n_trials=6)
     assert all("sign_rule" in t.params for t in study.trials)
+
+
+def test_cross_table_exposes_an_interaction_a_marginal_hides(tmp_path, capsys):
+    """orthogonal can be bad on average yet best for one rule specifically."""
+    def t(i, ce, rule, pre):
+        return {"trial": i, "val_ce": ce, "pruned": False,
+                "params": {"sign_rule": rule, "sign_precondition": pre, "sign_step": 0.01}}
+
+    rows = [
+        t(0, 5.31, "stoch_round", "orthogonal"), t(1, 5.37, "stoch_round", "orthogonal"),
+        t(2, 6.40, "stoch_round", "none"),
+        t(3, 4.94, "stoch_flip", "none"), t(4, 5.04, "stoch_flip", "none"),
+        t(5, 6.20, "stoch_flip", "orthogonal"),
+    ]
+    report(make_summary(tmp_path, rows), cross=("sign_rule", "sign_precondition"))
+    out = capsys.readouterr().out
+    assert "best val_ce by sign_rule x sign_precondition" in out
+    # orthogonal wins for stoch_round, loses for stoch_flip: an interaction
+    assert "5.3100" in out and "4.9400" in out
+    assert "( 2)" in out  # cell counts are shown (right-aligned to width 2)
+
+
+def test_cross_table_handles_a_missing_param(tmp_path, capsys):
+    report(make_summary(tmp_path, [trial(0, 5.0, 0.01)]), cross=("sign_rule", "nope"))
+    assert "no completed trials carry both" in capsys.readouterr().out

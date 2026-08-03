@@ -109,11 +109,12 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
     )
     space = {
         "sign_rule": rule,
-        # Lower bound dropped a decade: `stoch_round` can move two lattice
-        # points in one step when eta*|u| is large, so it plausibly needs a much
-        # smaller step than `stoch_flip`, which moves at most one.  Flooring the
-        # range at 3e-3 would handicap it in a rule comparison.
-        "sign_step": trial.suggest_float("sign_step", 3e-4, 5e-1, log=True),
+        # Left at 3e-3.  A brief detour widened this to 3e-4 on the theory that
+        # `stoch_round` needs a much smaller step because it can move two
+        # lattice points at once; the observed optima for both rules then landed
+        # near 0.011, so the theory was wrong and the extra decade only diluted
+        # the search.  Both rules appear to want a similar step.
+        "sign_step": trial.suggest_float("sign_step", 3e-3, 5e-1, log=True),
         "sign_b1": trial.suggest_float("sign_b1", 0.0, 0.98),
         # [0, 1) is the natural domain of an EMA decay and there is no principled
         # reason to exclude the short-memory end; b2=0 simply means "no memory".
