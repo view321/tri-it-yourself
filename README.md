@@ -113,6 +113,53 @@ python -m tri.train --preset main --quant bf16 --dataset bin --data-dir data --s
 python -m tri.train --preset main --quant ste  --dataset bin --data-dir data --steps 3000
 ```
 
+## Preemptible / spot instances
+
+Checkpoints written with `--ckpt-every` hold the **full training state** — parameters, Muon and Adam
+moments, the sign optimizer's momentum buffer and PRNG key, both host RNG streams, and the step
+counters that every schedule reads from. Resume is therefore exact, not approximate: an interrupted
+run continued with `--resume auto` produces bit-identical weights to an uninterrupted one, which is
+what `tests/test_resume.py` asserts.
+
+```bash
+python -m tri.train --preset main --quant sign --dataset bin --data-dir data \
+    --ckpt-every 500 --keep-last 2 --resume auto
+```
+
+Run that same command after every preemption; `auto` picks the newest checkpoint in the run
+directory and starts fresh if there isn't one, so it is safe as a restart loop. Two things to know:
+
+- **Keep `--steps` identical across segments.** Schedules are built from `total_steps`, so a segment
+  that declares a different length runs a differently shaped LR and flip-rate schedule.
+- `final.npz` stays params-only (that's what `tri.sample` reads). The resumable state lives in
+  `ckpt_*.npz`, which are correspondingly larger.
+
+## Running on a TPU instead
+
+JAX is native on TPU and nothing here is CUDA-specific, so a single-chip VM works with no code
+changes. A **v6e-1** (918 bf16 TFLOPS, 32 GB) is roughly 4× an RTX 5090 at the same memory, which
+turns the 2-day run into something closer to twelve hours; a **v5e-1** (197 TFLOPS, 16 GB) is about
+5090-equivalent on compute, so halve `--batch-size` and double `--grad-accum` to hold tokens/step.
+
+```bash
+python -m tri.train --preset main --quant sign --dataset bin --data-dir data \
+    --device-tflops 918 --ckpt-every 500 --resume auto
+```
+
+`--device-tflops` only affects the reported MFU; leaving it at the 5090 default would overstate MFU
+on a v6e by about 4×.
+
+Stay on **one chip** unless you are willing to add sharding. There are no `Mesh`, `NamedSharding`, or
+`pmap` constructs in this repo, so `jax.jit` places everything on `jax.devices()[0]` — an 8-chip slice
+would rent eight chips and use one. Adding data parallelism is contained (mesh over devices, shard the
+batch axis of `xs`/`ys`, replicate params) because gradient accumulation is already a `lax.scan` over
+microbatches, but it is not written yet.
+
+Two TPU caveats worth verifying early with `--preset smoke --quant sign --steps 60`: `optax.apply_updates`
+does int8 arithmetic on the ternary weights, and `jax.nn.dot_product_attention` has no cuDNN backend on
+TPU so it falls back to the XLA implementation — correct, but not a fused flash kernel, so expect lower
+MFU than on a GPU. Budget a few minutes of XLA compile time, once per distinct loop count.
+
 ## Ablations
 
 Tune the sign optimizer first — the flip-rate schedule is the most sensitive knob in the project:
@@ -182,9 +229,10 @@ tri/model.py       looped transformer (RoPE, SwiGLU, RMSNorm, remat)
 tri/muon.py        Newton-Schulz orthogonalization as an optax transform
 tri/sign_opt.py    the stochastic sign optimizer
 tri/optim.py       per-group optimizer assembly and schedules
-tri/train.py       training loop (grad accum in-step, randomized loop count)
+tri/train.py       training loop (grad accum in-step, randomized loop count, resume)
 tri/ablate.py      Optuna studies
-tri/prepare_data.py, tri/sample.py, tri/ckpt.py
+tri/ckpt.py        checkpoints: 2-bit packing, full-state resume, rotation
+tri/prepare_data.py, tri/sample.py
 ```
 
 ## References

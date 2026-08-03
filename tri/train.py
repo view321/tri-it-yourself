@@ -32,6 +32,34 @@ def _sign_leaves(tree, label_leaves):
     return [x for x, l in zip(jax.tree_util.tree_leaves(tree), label_leaves) if l == "sign"]
 
 
+def _resume_meta(step, best, mc: ModelConfig, counts: dict, rng, loop_rng) -> dict:
+    """Everything needed to continue a run that was killed mid-flight."""
+    return {
+        "step": int(step),
+        "best": None if best == math.inf else float(best),
+        "quant": mc.quant,
+        "params_total": counts["total"],
+        "data_rng": rng.bit_generator.state,
+        "loop_rng": loop_rng.bit_generator.state,
+    }
+
+
+def _check_resume_compatible(meta: dict, mc: ModelConfig, params) -> None:
+    """Catch a resume into a different architecture before it trains garbage.
+
+    A structural mismatch already fails in the loader, but same-shape/different-
+    hyperparameter resumes (e.g. switching quant mode) would otherwise proceed
+    silently with meaningless optimizer state.
+    """
+    want = {"quant": mc.quant, "params_total": count_params(params)["total"]}
+    for k, v in want.items():
+        if k in meta and meta[k] != v:
+            raise ValueError(
+                f"checkpoint has {k}={meta[k]!r} but this config wants {v!r}; "
+                "resume requires a matching architecture"
+            )
+
+
 def make_train_step(mc: ModelConfig, tx, label_leaves, donate: bool = True):
     def step(params, opt_state, xs, ys, n_loops: int):
         fparams = materialize(params, mc)
@@ -130,6 +158,32 @@ def train(
     tx = build_optimizer(labels, oc, tc, seed=tc.seed)
     opt_state = tx.init(params)
 
+    rng = np.random.default_rng(tc.seed)
+    loop_rng = np.random.default_rng(tc.seed + 1)
+    start_step = 1
+    best = math.inf
+    resumed_from = None
+    if tc.resume:
+        path = ckpt_io.latest_checkpoint(run_dir) if tc.resume == "auto" else tc.resume
+        if path is None:
+            if verbose:
+                print(f"[{tc.run_name}] --resume auto found no checkpoint; starting fresh")
+        else:
+            # Check the cheap metadata before unflattening the tree, so a
+            # mismatched resume reports why instead of a missing-leaf KeyError.
+            _check_resume_compatible(ckpt_io.read_extra(path), mc, params)
+            params, opt_state, meta = ckpt_io.load_train_state(path, params, opt_state)
+            start_step = int(meta["step"]) + 1
+            saved_best = meta.get("best")  # stored as null when still infinite
+            best = math.inf if saved_best is None else float(saved_best)
+            # Restoring the data streams matters: without it a resumed run
+            # replays the same batches it already trained on.
+            rng.bit_generator.state = meta["data_rng"]
+            loop_rng.bit_generator.state = meta["loop_rng"]
+            resumed_from = path
+            if verbose:
+                print(f"[{tc.run_name}] resumed from {path} at step {start_step}", flush=True)
+
     train_src, val_src = build_data(tc, mc)
     donate = jax.default_backend() != "cpu"
     step_fn = make_train_step(mc, tx, label_leaves, donate=donate)
@@ -151,6 +205,9 @@ def train(
         "tokens_per_step": tokens_per_step,
         "loss_floor": loss_floor(val_src),
         "backend": jax.default_backend(),
+        "device_tflops": tc.device_tflops,
+        "resumed_from": resumed_from,
+        "start_step": start_step,
     }
     emit(header)
     if verbose:
@@ -164,14 +221,11 @@ def train(
             flush=True,
         )
 
-    rng = np.random.default_rng(tc.seed)
-    loop_rng = np.random.default_rng(tc.seed + 1)
-    best = math.inf
     final: dict = {}
     t_last = time.time()
     tokens_since = 0
 
-    for step in range(1, tc.total_steps + 1):
+    for step in range(start_step, tc.total_steps + 1):
         n_loops = int(loop_rng.integers(tc.loop_lo, tc.loop_hi + 1)) if mc.n_core else 1
         xb, yb = [], []
         for _ in range(tc.grad_accum):
@@ -211,6 +265,18 @@ def train(
             t_last = time.time()
             tokens_since = 0
 
+        # Checkpoint before evaluating: on a preemptible instance the step that
+        # just finished is what we want on disk, and an early stop below must
+        # not discard it.
+        if tc.ckpt_every and step % tc.ckpt_every == 0:
+            ckpt_io.save_train_state(
+                os.path.join(run_dir, f"ckpt_{step:07d}.npz"),
+                params,
+                opt_state,
+                _resume_meta(step, best, mc, counts, rng, loop_rng),
+            )
+            ckpt_io.rotate_checkpoints(run_dir, tc.keep_last)
+
         do_eval = tc.eval_every and (step % tc.eval_every == 0 or step == tc.total_steps)
         if do_eval:
             ev_metrics = evaluate(ev, params, val_src, tc, mc)
@@ -228,10 +294,6 @@ def train(
                 break
             t_last = time.time()
             tokens_since = 0
-
-        if tc.ckpt_every and step % tc.ckpt_every == 0:
-            p = os.path.join(run_dir, f"ckpt_{step:07d}.npz")
-            ckpt_io.save(p, params, pack=True, extra={"step": step, "quant": mc.quant})
 
         if tc.time_budget_s and (time.time() - t_start) > tc.time_budget_s:
             emit({"event": "time_budget_reached", "step": step})
@@ -285,6 +347,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--loop-hi", type=int, default=None)
     p.add_argument("--eval-every", type=int, default=None)
     p.add_argument("--ckpt-every", type=int, default=None)
+    p.add_argument("--keep-last", type=int, default=None,
+                   help="checkpoints to retain (<=0 keeps all)")
+    p.add_argument("--resume", default=None,
+                   help="'auto' for the newest checkpoint in the run dir, or a path")
+    p.add_argument("--device-tflops", type=float, default=None,
+                   help="peak dense BF16 TFLOPS for MFU logging "
+                        "(5090 209.5 | TPU v5e 197 | TPU v6e 918 | A100 312 | H100 989)")
     p.add_argument("--time-budget-s", type=float, default=None)
     p.add_argument("--no-remat", action="store_true")
     p.add_argument("--act-bits", type=int, default=None)
@@ -328,6 +397,9 @@ def configs_from_args(args) -> tuple[ModelConfig, TrainConfig, OptimConfig]:
         "loop_hi": args.loop_hi,
         "eval_every": args.eval_every,
         "ckpt_every": args.ckpt_every,
+        "keep_last": args.keep_last,
+        "resume": args.resume,
+        "device_tflops": args.device_tflops,
         "time_budget_s": args.time_budget_s,
     }
     optim = {

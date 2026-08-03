@@ -194,7 +194,8 @@ class TrainConfig:
     eval_batches: int = 20
     log_every: int = 10
     ckpt_every: int = 0  # 0 disables
-    keep_last: int = 1
+    keep_last: int = 1  # checkpoints to retain; <=0 keeps all
+    resume: str = ""  # "" | "auto" (newest in run dir) | path to a ckpt_*.npz
 
     # Randomized loop count during training: uniform over [lo, hi].
     loop_lo: int = 2
@@ -204,7 +205,9 @@ class TrainConfig:
     track_oscillation: bool = False
     time_budget_s: float = 0.0  # 0 = no limit
     profile_mfu: bool = True
-    device_tflops: float = 209.5  # RTX 5090 dense BF16 (non-sparse)
+    # Peak dense BF16 TFLOPS of one device, used only to turn tokens/s into an
+    # MFU figure.  RTX 5090 209.5 | TPU v5e 197 | TPU v6e 918 | A100 312 | H100 989.
+    device_tflops: float = 209.5
 
     @property
     def tokens_per_step(self) -> int:
