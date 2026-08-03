@@ -162,6 +162,14 @@ python -c "import jax; print(jax.devices())"
 pip install -e ".[data,tune]"
 ```
 
+TPU VMs are managed from the Console's **TPUs** page (which has its own SSH button), not the
+Compute Engine *VM instances* list. `--worker=all` runs a command on every host of a multi-host
+slice; a single-chip VM has only worker 0, so you can omit it. Add `--tunnel-through-iap` if the VM
+has no external IP.
+
+Start long runs **detached** — `tmux new -s tri`, then `Ctrl-b d` — or an SSH timeout takes the job
+with it. `--resume auto` makes that recoverable rather than fatal, but not needing it is better.
+
 Confirm the accelerator string for your zone with
 `gcloud compute tpus accelerator-types list --zone="$ZONE"` rather than trusting the table — the
 naming has changed between generations. TPU v6e needs **JAX ≥ 0.4.37**, which this project's floor of
