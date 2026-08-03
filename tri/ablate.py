@@ -88,7 +88,10 @@ def _sign_space(trial) -> dict:
         "sign_rule": rule,
         "sign_step": trial.suggest_float("sign_step", 3e-3, 5e-1, log=True),
         "sign_b1": trial.suggest_float("sign_b1", 0.0, 0.98),
-        "sign_b2": trial.suggest_float("sign_b2", 0.9, 0.999, log=False),
+        # Widened downward: at `tiny`/3000 steps the winning b2 values pinned
+        # against a 0.9 lower bound, so the optimum was outside the interval.
+        # Short momentum memory suits a noisy flip process.
+        "sign_b2": trial.suggest_float("sign_b2", 0.5, 0.999, log=False),
         "sign_normalize": trial.suggest_categorical("sign_normalize", ["rms", "absmean"]),
         "sign_precondition": trial.suggest_categorical("sign_precondition", ["none", "orthogonal"]),
         "adam_lr": trial.suggest_float("adam_lr", 3e-4, 1e-2, log=True),
@@ -191,6 +194,10 @@ def main(argv=None):
     )
 
     rows: list[dict] = []
+    # Record each knob's true search bounds and scale.  Inferring them from the
+    # sampled values misreads a linear range whose minimum happens to land near
+    # zero as log-scaled, which then reports a healthy knob as pinned to an edge.
+    dists: dict = {}
     t0 = time.time()
 
     def objective(trial):
@@ -211,6 +218,13 @@ def main(argv=None):
                 "time_budget_s": args.time_budget_s,
             }
         )
+        for name, d in trial.distributions.items():
+            if hasattr(d, "low") and hasattr(d, "high"):
+                dists[name] = {
+                    "low": float(d.low),
+                    "high": float(d.high),
+                    "log": bool(getattr(d, "log", False)),
+                }
         r = run_trial(args.preset, model_o, train_o, optim_o, trial, verbose=args.verbose)
         rows.append(
             {
@@ -238,6 +252,7 @@ def main(argv=None):
         "preset": args.preset,
         "steps": args.steps,
         "trials": rows,
+        "distributions": dists,
         "best_value": study.best_value,
         "best_params": study.best_params,
         "wall_s": time.time() - t0,

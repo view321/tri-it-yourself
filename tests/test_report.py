@@ -48,8 +48,8 @@ def test_knob_is_unresolved_when_winners_span_the_search_range(tmp_path, capsys)
 
 def test_knob_is_determined_when_winners_cluster(tmp_path, capsys):
     """Winners tightly grouped at one end: the study really did locate it."""
-    good = [trial(i, 4.0 + 0.001 * i, 0.010 + 0.0001 * i) for i in range(4)]
-    bad = [trial(10 + i, 9.0 + i, 0.5 + 0.1 * i) for i in range(8)]
+    good = [trial(i, 4.0 + 0.001 * i, 0.20 + 0.0001 * i) for i in range(4)]
+    bad = [trial(10 + i, 9.0 + i, 0.05 + 0.2 * i) for i in range(6)]
     report(make_summary(tmp_path, good + bad))
     out = capsys.readouterr().out
     assert "determined" in out and "UNRESOLVED" not in out
@@ -58,3 +58,44 @@ def test_knob_is_determined_when_winners_cluster(tmp_path, capsys):
 def test_errors_when_every_trial_was_pruned(tmp_path):
     with pytest.raises(SystemExit, match="no completed trials"):
         report(make_summary(tmp_path, [trial(0, 5.0, 0.01, pruned=True)]))
+
+
+def test_a_value_whose_trials_all_pruned_is_reported_not_dropped(tmp_path, capsys):
+    """An arm that never survives is a finding; it must not vanish silently."""
+    rows = [trial(i, 5.0 + 0.01 * i, 0.01, rule="stoch_flip") for i in range(4)]
+    rows += [trial(10 + i, 9.0, 0.02, rule="stoch_round", pruned=True) for i in range(5)]
+    report(make_summary(tmp_path, rows))
+    out = capsys.readouterr().out
+    assert "stoch_round" in out and "ALL 5 SAMPLED TRIALS PRUNED" in out
+
+
+def test_winners_pinned_to_a_search_bound_are_flagged(tmp_path, capsys):
+    """sign_b2 hugging its lower bound means the optimum is outside the range."""
+    good = [trial(i, 4.0 + 0.01 * i, 0.901 + 0.001 * i) for i in range(4)]
+    bad = [trial(10 + i, 9.0 + i, 0.95 + 0.01 * i) for i in range(6)]
+    report(make_summary(tmp_path, good + bad))
+    out = capsys.readouterr().out
+    assert "AT LOWER EDGE" in out
+
+
+def test_recorded_distributions_beat_guessing_the_scale(tmp_path, capsys):
+    """A linear knob whose sampled min lands near zero must not read as log.
+
+    sign_b1 is searched linearly on [0, 0.98]; inferring log scale from the
+    sampled ratio would put a median of 0.70 at 92% of the range and wrongly
+    flag a perfectly interior knob as pinned to the upper edge.
+    """
+    rows = [
+        {"trial": i, "val_ce": 4.0 + 0.01 * i, "pruned": False,
+         "params": {"sign_b1": v}}
+        for i, v in enumerate([0.70, 0.69, 0.71, 0.90, 0.95, 0.017, 0.30, 0.55])
+    ]
+    payload = {"study": "sign", "preset": "tiny", "steps": 3000, "trials": rows,
+               "distributions": {"sign_b1": {"low": 0.0, "high": 0.98, "log": False}},
+               "best_value": 4.0, "best_params": {}}
+    p = tmp_path / "sign_summary.json"
+    p.write_text(json.dumps(payload))
+    report(str(p))
+    out = capsys.readouterr().out
+    assert "[lin]" in out
+    assert "EDGE" not in out
