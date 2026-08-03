@@ -217,6 +217,17 @@ finishes, use `--dataset induction` — a real signal with a known floor, and no
 `modes` deliberately gives each arm its own tuned learning rate. Comparing arms at one shared LR only
 measures which arm happened to like that LR.
 
+Read the result with `tri.report` rather than trusting the single best trial — with eight knobs and a
+few dozen trials, the winner is partly luck:
+
+```bash
+python -m tri.report runs/ablate/sign_summary.json --uniform 10.3972
+```
+
+It ranks categorical choices by best *and* mean, and for each numeric knob prints the interval the top
+quartile occupies. A knob whose winners cover most of the searched range is marked `UNRESOLVED`: the
+study did not determine it, however decisive the best value looks.
+
 ## What the CPU smoke test actually shows
 
 These are from the `smoke` preset — a **0.2M-parameter model on a synthetic period-8 copy task**,
