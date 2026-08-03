@@ -378,3 +378,33 @@ def test_compare_shows_wall_clock_since_only_steps_are_matched(tmp_path, capsys)
     compare([a, b])
     out = capsys.readouterr().out
     assert "s/trial" in out and "260" in out and "180" in out
+
+
+def test_flop_matched_steps_equalise_compute_across_loop_counts():
+    """A fixed budget buys depth per token or more tokens, never both."""
+    from tri.ablate import flop_matched_steps
+    from tri.config import build_configs
+
+    mc, _, _ = build_configs("wide")
+    ref_loops, ref_steps = mc.n_loops, 4000
+    for loops in (1, 2, 3, 4):
+        steps = flop_matched_steps("wide", loops, ref_steps)
+        spent = steps * mc.flops_per_token(loops)
+        budget = ref_steps * mc.flops_per_token(ref_loops)
+        assert spent == pytest.approx(budget, rel=0.01), loops
+    # cheaper loop counts must buy strictly more steps
+    assert flop_matched_steps("wide", 1, 4000) > flop_matched_steps("wide", 4, 4000)
+
+
+def test_loops_study_requests_flop_matching(tmp_path):
+    optuna = pytest.importorskip("optuna")
+    from tri.ablate import _study_fn
+
+    st = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
+    seen = []
+    st.optimize(lambda t: (seen.append(_study_fn("loops", t, fix_loops=2)), 1.0)[1], n_trials=2)
+    for model_o, train_o, _ in seen:
+        assert model_o["n_loops"] == 2
+        assert train_o["loop_lo"] == train_o["loop_hi"] == 2
+        assert train_o["_flop_matched_loops"] == 2
+    assert all("n_loops" not in t.params for t in st.trials)  # pinned, not searched

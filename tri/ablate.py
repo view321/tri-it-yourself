@@ -9,8 +9,10 @@ the real run:
 ``modes``     bf16 vs STE-latent vs latent-free sign, each with its own
               learning rate tuned under the same trial budget.  Comparing arms
               at one shared LR would just measure which arm liked that LR.
-``loops``     quality vs loop count at fixed stored parameters, plus a
-              compute-matched control that spends the same FLOPs on depth.
+``loops``     is looping worth its FLOPs?  FLOP-matched, so a cheaper loop
+              count buys proportionally more steps and the winner is the better
+              use of a fixed budget - which is the question a compute budget
+              actually poses.
 ``momentum``  what the momentum buffer actually buys, in val loss per bit.
 
 Example:
@@ -184,7 +186,15 @@ def _modes_space(trial, fix_quant: str | None = None) -> tuple[dict, dict]:
     return {"quant": quant}, optim
 
 
-def _study_fn(study: str, trial, fix_rule: str | None = None, fix_quant: str | None = None):
+def flop_matched_steps(preset: str, loops: int, ref_steps: int, ref_loops: int | None = None) -> int:
+    """Steps that spend the same FLOPs at `loops` as `ref_steps` does at the preset's default."""
+    mc, _, _ = build_configs(preset)
+    ref = ref_loops if ref_loops is not None else mc.n_loops
+    return max(1, round(ref_steps * mc.flops_per_token(ref) / mc.flops_per_token(loops)))
+
+
+def _study_fn(study: str, trial, fix_rule: str | None = None, fix_quant: str | None = None,
+              fix_loops: int | None = None):
     """Return (model_overrides, train_overrides, optim_overrides) for a trial."""
     if study == "sign":
         return {"quant": "sign"}, {}, _sign_space(trial, fix_rule)
@@ -192,14 +202,16 @@ def _study_fn(study: str, trial, fix_rule: str | None = None, fix_quant: str | N
         m, o = _modes_space(trial, fix_quant)
         return m, {}, o
     if study == "loops":
-        loops = trial.suggest_categorical("n_loops", [1, 2, 3, 4])
-        matched = trial.suggest_categorical("compute_matched", [False, True])
-        model = {"quant": "sign", "n_loops": loops}
-        if matched:
-            # Same FLOPs as loops=1 by shrinking the core instead of looping.
-            model["n_core"] = max(1, 4 // loops)
-            model["n_loops"] = loops
-        return model, {"loop_lo": loops, "loop_hi": loops}, {}
+        loops = fix_loops or trial.suggest_categorical("n_loops", [1, 2, 3, 4])
+        # FLOP-matched, which is the decision this study actually informs: a
+        # fixed budget buys either more depth per token or more tokens, not
+        # both.  Cheaper loop counts therefore get proportionally more steps,
+        # so every arm spends the same compute and the winner is the better use
+        # of it.  Comparing at equal *steps* would just confirm that more
+        # compute helps, which needs no experiment.
+        return ({"quant": "sign", "n_loops": loops},
+                {"loop_lo": loops, "loop_hi": loops, "_flop_matched_loops": loops},
+                {})
     if study == "momentum":
         dt = trial.suggest_categorical(
             "sign_momentum_dtype", ["none", "int8", "float16", "float32"]
@@ -235,6 +247,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--fix-rule", default=None, choices=["stoch_round", "stoch_flip", "bop"],
                     help="pin sign_rule so each rule can be tuned on an equal budget; "
                          "TPE otherwise starves whichever rule loses early")
+    ap.add_argument("--fix-loops", type=int, default=None, choices=[1, 2, 3, 4, 5],
+                    help="pin n_loops for a FLOP-matched `loops` study")
     ap.add_argument("--fix-quant", default=None, choices=["bf16", "ste", "sign"],
                     help="pin the weight mode for a `modes` study; run one study per "
                          "arm so each gets an equal budget rather than TPE's allocation")
@@ -281,8 +295,13 @@ def main(argv=None):
     t0 = time.time()
 
     def objective(trial):
-        model_o, train_o, optim_o = _study_fn(args.study, trial, args.fix_rule, args.fix_quant)
+        model_o, train_o, optim_o = _study_fn(
+            args.study, trial, args.fix_rule, args.fix_quant, args.fix_loops)
         train_o = dict(train_o)
+        # A FLOP-matched study sets its own step count; everything else
+        # takes --steps directly.
+        matched = train_o.pop("_flop_matched_loops", None)
+        steps = flop_matched_steps(args.preset, matched, args.steps) if matched else args.steps
         train_o.update(
             {
                 # Tagging the directory keeps a re-run's per-trial log.jsonl from
@@ -290,7 +309,7 @@ def main(argv=None):
                 # two different search spaces in one file.
                 "run_name": f"{args.study}{tag}/t{trial.number:03d}",
                 "out_dir": args.out_dir,
-                "total_steps": args.steps,
+                "total_steps": steps,
                 "seed": args.seed,
                 "dataset": args.dataset,
                 "data_dir": args.data_dir,
