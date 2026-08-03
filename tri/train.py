@@ -361,12 +361,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sign-step", type=float, default=None)
     p.add_argument("--sign-b1", type=float, default=None)
     p.add_argument("--sign-b2", type=float, default=None)
-    p.add_argument("--sign-rule", default=None, choices=["stoch_round", "stoch_flip", "bop"])
+    p.add_argument("--sign-rule", default=None,
+                   choices=["stoch_round", "stoch_flip", "bop", "ef"])
     p.add_argument("--sign-normalize", default=None, choices=["rms", "absmean", "none"])
     p.add_argument("--sign-precondition", default=None, choices=["none", "orthogonal"])
     p.add_argument("--sign-threshold", type=float, default=None)
     p.add_argument("--sign-momentum-dtype", default=None,
                    choices=["none", "int8", "float16", "bfloat16", "float32"])
+    p.add_argument("--sign-residual-dtype", default=None,
+                   choices=["int8", "float16", "float32"],
+                   help="storage precision of the ef rule's residual")
     p.add_argument("--sign-zero-bias", type=float, default=None)
     p.add_argument("--muon-lr", type=float, default=None)
     p.add_argument("--adam-lr", type=float, default=None)
@@ -411,6 +415,7 @@ def configs_from_args(args) -> tuple[ModelConfig, TrainConfig, OptimConfig]:
         "sign_precondition": args.sign_precondition,
         "sign_threshold": args.sign_threshold,
         "sign_momentum_dtype": args.sign_momentum_dtype,
+        "sign_residual_dtype": args.sign_residual_dtype,
         "sign_zero_bias": args.sign_zero_bias,
         "muon_lr": args.muon_lr,
         "adam_lr": args.adam_lr,

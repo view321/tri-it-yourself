@@ -17,6 +17,24 @@ w = stochastic_round(v)                E[w_new] = v, so the step is unbiased
 That is "keep a latent weight for one instant, then collapse it." `eta` is measured in lattice units
 and is directly the per-step flip probability, so it warms up and decays like a learning rate.
 
+The collapse is also the rule's weakness: the fractional part of every update is sampled away
+instead of remembered, which injects a full lattice unit of noise per crossing however small the
+signal.  The `ef` rule keeps that fraction in a *bounded* per-weight residual — flips fire only when
+the integrated update crosses a cell boundary (with optional hysteresis):
+
+```
+v = w + e - eta * u                      e = sub-cell residual, |e| <= 0.5 + h
+w = w + sign(v - w) * [|v - w| >= 0.5+h] fire on accumulated evidence, not per-step chance
+e = v - w                                remainder carried exactly
+```
+
+`(w, e)` is a latent weight decomposed as lattice point + fractional position.  Because the residual
+is bounded to one cell it stores in int8 with a fixed scale, so the honest accounting is 8 bits of
+latent instead of STE's 32 — and the trajectory of `w + e` is momentum SGD on a clipped latent, the
+same information flow that makes STE train well, at a quarter of the state.  A weight whose gradient
+oscillates integrates to nothing and stops flipping; `stoch_round` would keep churning it at
+`eta*|u|` per step.
+
 This is a research experiment, not a reproduction of a known result. Latent-free ternary training has
 not been convincingly shown to match STE at LLM scale, so the repo ships all three arms —
 `bf16`, `ste`, `sign` — behind one flag and one training loop, and an Optuna harness to compare them
@@ -28,7 +46,9 @@ honestly.
 |---|---|---|---|
 | `bf16` | fp32 | 64 bits (weight + Muon momentum) | baseline |
 | `ste` | fp32 latent | 64 bits | BitNet-style; ternary only at inference |
-| `sign` + fp16 momentum | int8 ternary | **18 bits** | default |
+| `sign` ef + int8 momentum | int8 ternary | **18 bits** | int8 residual; STE-like dynamics |
+| `sign` ef + fp16 momentum | int8 ternary | **26 bits** | int8 residual; safest ef config |
+| `sign` + fp16 momentum | int8 ternary | **18 bits** | stoch_round default |
 | `sign` + int8 momentum | int8 ternary | **10 bits** | experimental |
 | `sign`, stateless | int8 ternary | **2 bits** | the pure claim; noisiest |
 
@@ -236,7 +256,7 @@ drawn 5 times, lost all 5, and was then effectively abandoned. That is evidence 
 evidence it is worse. To actually rank the flip rules, pin each one and give it an equal budget:
 
 ```bash
-for r in stoch_round stoch_flip bop; do
+for r in stoch_round stoch_flip bop ef; do
   python -m tri.ablate --study sign --fix-rule $r --tag $r --trials 12 --steps 3000 \
       --preset tiny --dataset bin --data-dir data
 done
@@ -293,7 +313,8 @@ honest comparison is between things that occupy the same memory at inference:
 | `bf16`, unquantized | 16–32 | 64 | reference ceiling, not a competitor |
 | `bf16` → PTQ ternary | 2 | 64 | the "just quantize it afterwards" baseline |
 | `ste` (this *is* QAT) | 2 | 64 | the strong low-memory baseline |
-| `sign` | 2 | **18** | latent-free ternary |
+| `sign` stoch_round | 2 | **18** | latent-free ternary |
+| `sign` ef | 2 | **18–26** | bounded 8-bit latent; STE's information flow |
 
 ```bash
 python -m tri.ptq runs/modes-bf16/t000 --dataset bin --data-dir data --uniform 10.3972
@@ -313,13 +334,24 @@ defaults; they say nothing about how any of this behaves at 136M parameters on r
 
 Uniform baseline is 5.545 nats; the task's floor is 0.606.
 
-| | seed 0 | seed 1 |
-|---|---|---|
-| `bf16` (Muon) | 1.73 | 3.22 |
-| `ste` | 3.94 | 3.79 |
-| `sign` (fp16 momentum) | 1.18 | 1.19 |
+| | seed 0 | seed 1 | state bits/w |
+|---|---|---|---|
+| `bf16` (Muon) | 1.73 | 3.22 | 64 |
+| `ste` | 3.94 | 3.79 | 64 |
+| `sign` stoch_round (fp16 momentum) | 1.18 | 1.19 | 18 |
+| `sign` ef (fp16 momentum + int8 residual) | **0.69** | **0.89** | 26 |
+| `sign` ef (int8 momentum + int8 residual) | 1.00 | 1.52 | 18 |
 
-Three things worth taking from this, none of which is "ternary beats float":
+The ef rows were measured after the others, on a machine whose re-runs of the control arms gave
+1.15/1.18 (`stoch_round`) and 3.89 (`ste`) — close enough to read the table as one experiment.
+
+Four things worth taking from this, none of which is "ternary beats float":
+
+- **Error feedback beats imposed flips on both seeds, by more than the seed spread.** The only
+  difference between the ef rows and the `stoch_round` row is whether the fractional update is
+  carried in a residual or resampled away; at matched fp16 momentum it is worth ~0.4 nats here.
+  At a matched 18-bit budget the comparison is a wash on this toy (1.00/1.52 vs 1.18/1.19) — the
+  int8 momentum's per-tensor max scale is the fragile bit, and seed 1 shows it.
 
 - **Momentum is what makes the sign optimizer work.** At a matched step size, stateless updates reach
   5.12 — barely better than the uniform baseline — while int8 momentum reaches 0.98 and fp16 reaches
@@ -368,6 +400,10 @@ tri/prepare_data.py, tri/sample.py
   ternarization and the STE arm.
 - Helwegen et al., *Latent Weights Do Not Exist: Rethinking Binarized Neural Network Optimization*
   (2019) — the argument this repo takes literally, and the `bop` flip rule.
+- Seide et al., *1-Bit Stochastic Gradient Descent* (2014) and Karimireddy et al., *Error Feedback
+  Fixes SignSGD* (2019) — the error-feedback lineage behind the `ef` rule; Courbariaux et al.,
+  *BinaryConnect* (2015) for clipping the latent to keep it responsive, which is what bounds the
+  residual to one cell.
 - Jordan et al., *Muon: An optimizer for hidden layers in neural networks* (2024).
 - Geiping et al., *Scaling up Test-Time Compute with Latent Reasoning* (2025) — looped depth with
   embedding re-injection.

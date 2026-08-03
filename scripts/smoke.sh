@@ -15,6 +15,8 @@ for quant in bf16 ste sign; do
   $PY -m tri.train --preset smoke --quant "$quant" \
       --run-name "smoke-$quant" --out-dir runs/smoke --steps 400
 done
+$PY -m tri.train --preset smoke --quant sign --sign-rule ef \
+    --run-name "smoke-sign-ef" --out-dir runs/smoke --steps 400
 
 echo
 echo "== sampling from the ternary checkpoint =="

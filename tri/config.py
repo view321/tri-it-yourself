@@ -143,12 +143,13 @@ class OptimConfig:
     sign_step: float = 0.05  # peak step size, in lattice units
     sign_b1: float = 0.9  # direction interpolation (Lion-style)
     sign_b2: float = 0.99  # momentum EMA decay
-    sign_rule: str = "stoch_round"  # stoch_round | stoch_flip | bop
+    sign_rule: str = "stoch_round"  # stoch_round | stoch_flip | bop | ef
     sign_normalize: str = "rms"  # rms | absmean | none
     sign_precondition: str = "none"  # none | orthogonal (Newton-Schulz on momentum)
-    sign_threshold: float = 0.0  # hysteresis (bop) / dead-zone (stochastic rules)
+    sign_threshold: float = 0.0  # hysteresis (bop, ef) / dead-zone (stochastic rules)
     sign_max_flip_prob: float = 1.0
     sign_momentum_dtype: str = "float16"  # float32|bfloat16|float16|int8|none
+    sign_residual_dtype: str = "int8"  # int8|float16|float32 (rule='ef' only)
     sign_zero_bias: float = 0.0  # >0 biases updates toward w=0 (sparsity pressure)
 
     # -- Muon (2D float weights) --

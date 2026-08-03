@@ -14,11 +14,11 @@ from tri.quant import pack2, unpack2
 from tri.train import train
 
 
-def cfgs(tmp_path, name, **over):
+def cfgs(tmp_path, name, optim=None, **over):
     base = dict(out_dir=str(tmp_path), run_name=name, eval_every=0, eval_batches=2,
                 log_every=100, seed=3)
     base.update(over)
-    return build_configs("smoke", {"quant": "sign"}, base, {})
+    return build_configs("smoke", {"quant": "sign"}, base, optim or {})
 
 
 def final_weights(run_dir, mc):
@@ -132,6 +132,36 @@ def test_keep_all_when_keep_last_is_zero(tmp_path):
     train(mc, tc, oc, verbose=False)
     run_dir = os.path.join(str(tmp_path), "keepall")
     assert len([f for f in os.listdir(run_dir) if f.startswith("ckpt_")]) == 3
+
+
+def test_resumed_ef_run_matches_uninterrupted_run_exactly(tmp_path):
+    """The ef rule adds a residual buffer to SignState; losing it on resume
+    would shift every subsequent fire.  Same bit-exactness bar as the default
+    rule, with a step size large enough that fires actually happen in both
+    segments.
+    """
+    STEPS = 20
+    optim = {"sign_rule": "ef", "sign_step": 0.3}
+    mc_a, tc_a, oc_a = cfgs(tmp_path, "ef-straight", optim=optim, total_steps=STEPS,
+                            eval_every=10)
+    train(mc_a, tc_a, oc_a, verbose=False)
+
+    mc_b, tc_b, oc_b = cfgs(tmp_path, "ef-split", optim=optim, total_steps=STEPS,
+                            ckpt_every=10, eval_every=10)
+    train(mc_b, tc_b, oc_b, verbose=False, report_fn=lambda s, v: s >= 10)
+
+    ckpt = ckpt_io.latest_checkpoint(os.path.join(str(tmp_path), "ef-split"))
+    with np.load(ckpt, allow_pickle=False) as f:
+        assert any(".err" in k for k in f.files), "residual buffer missing from checkpoint"
+
+    mc_c, tc_c, oc_c = cfgs(tmp_path, "ef-split", optim=optim, total_steps=STEPS,
+                            ckpt_every=10, eval_every=10, resume="auto")
+    train(mc_c, tc_c, oc_c, verbose=False)
+
+    a = final_weights(os.path.join(str(tmp_path), "ef-straight"), mc_a)
+    b = final_weights(os.path.join(str(tmp_path), "ef-split"), mc_c)
+    for pa, pb in zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b)):
+        np.testing.assert_array_equal(np.asarray(pa), np.asarray(pb))
 
 
 # -- the packing hazard ------------------------------------------------

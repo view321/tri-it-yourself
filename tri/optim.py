@@ -60,6 +60,7 @@ def build_optimizer(labels, oc: OptimConfig, tc: TrainConfig, seed: int = 0):
             threshold=oc.sign_threshold,
             max_flip_prob=oc.sign_max_flip_prob,
             momentum_dtype=oc.sign_momentum_dtype,
+            residual_dtype=oc.sign_residual_dtype,
             zero_bias=oc.sign_zero_bias,
             ns_steps=oc.muon_ns_steps,
             seed=seed,
@@ -106,10 +107,14 @@ def state_bits_per_weight(oc: OptimConfig, quant: str) -> float:
     """Persistent training state per block-linear weight, in bits.
 
     The headline number this project is chasing.  bf16 weights + Adam moments
-    are 96 bits; bf16 + Muon momentum is 48; ternary + fp16 momentum is 18.
+    are 96 bits; bf16 + Muon momentum is 48; ternary + fp16 momentum is 18,
+    and so is the ``ef`` rule with int8 momentum + int8 residual.
     """
     if quant == "sign":
-        return bits_per_weight(oc.sign_momentum_dtype)
+        return bits_per_weight(
+            oc.sign_momentum_dtype,
+            residual_dtype=oc.sign_residual_dtype if oc.sign_rule == "ef" else None,
+        )
     if quant == "ste":
         # latent fp32 master + Muon momentum fp32 (the STE tax)
         return 32.0 + (32.0 if oc.muon_on_latent else 64.0)

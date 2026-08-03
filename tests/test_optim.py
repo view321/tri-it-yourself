@@ -97,7 +97,7 @@ def ternary_params(shape=(32, 16), seed=0):
     return {"w": init_ternary(jax.random.PRNGKey(seed), shape)}
 
 
-@pytest.mark.parametrize("rule", ["stoch_round", "stoch_flip", "bop"])
+@pytest.mark.parametrize("rule", ["stoch_round", "stoch_flip", "bop", "ef"])
 def test_updates_stay_on_the_lattice(rule):
     params = ternary_params()
     tx = stochastic_sign(0.2, rule=rule, threshold=0.5 if rule == "bop" else 0.0)
@@ -228,6 +228,203 @@ def test_rejects_bad_config():
         stochastic_sign(0.1, rule="nope")
     with pytest.raises(ValueError):
         stochastic_sign(0.1, momentum_dtype="float8")
+    with pytest.raises(ValueError):
+        stochastic_sign(0.1, rule="ef", residual_dtype="none")
+    with pytest.raises(ValueError):
+        stochastic_sign(0.1, rule="ef", threshold=-0.1)
+
+
+# -- error feedback (`ef`) ---------------------------------------------
+
+
+def test_ef_consistent_gradient_drives_weights_against_it():
+    params = ternary_params((64, 64))
+    tx = stochastic_sign(0.2, b1=0.9, rule="ef")
+    state = tx.init(params)
+    g = {"w": jnp.ones((64, 64), jnp.float32)}
+    start = float(jnp.mean(params["w"]))
+    for _ in range(30):
+        upd, state = tx.update(g, state, params)
+        params = optax.apply_updates(params, upd)
+    end = float(jnp.mean(params["w"]))
+    assert end < start
+    assert end < -0.5
+
+
+def test_ef_zero_gradient_causes_no_flips_and_no_drift():
+    params = ternary_params()
+    tx = stochastic_sign(0.5, rule="ef")
+    state = tx.init(params)
+    before = np.asarray(params["w"]).copy()
+    for _ in range(5):
+        upd, state = tx.update({"w": jnp.zeros_like(params["w"], jnp.float32)}, state, params)
+        params = optax.apply_updates(params, upd)
+    np.testing.assert_array_equal(np.asarray(params["w"]), before)
+    # the residual must not wander either: no signal in, no state change
+    assert float(jnp.max(jnp.abs(state.err["w"].astype(jnp.float32)))) == 0.0
+
+
+def test_ef_integrates_and_fires_deterministically():
+    """Sub-threshold signal accumulates and fires exactly when the cell
+    boundary is crossed - no flips before, a mass flip at the crossing.
+
+    With a constant gradient and rms normalization, |u| == 1 for every weight,
+    so the residual moves by exactly eta per step and weights not pinned at the
+    clip fire together at step ceil(0.5 / eta).
+    """
+    eta = 0.05
+    params = ternary_params((64, 64), seed=1)
+    tx = stochastic_sign(eta, b1=0.0, momentum_dtype="none", rule="ef",
+                         residual_dtype="float32")
+    state = tx.init(params)
+    g = {"w": jnp.ones((64, 64), jnp.float32)}
+    movable = float(jnp.mean(params["w"] > -1))  # weights at -1 only pin deeper
+    for step in range(1, 11):
+        upd, state = tx.update(g, state, params)
+        rate = float(flip_stats(upd, params)["flip_rate"])
+        params = optax.apply_updates(params, upd)
+        if step < 10:
+            assert rate == 0.0, f"fired early at step {step}"
+        else:
+            assert rate == pytest.approx(movable)
+
+
+def test_ef_ignores_oscillating_gradients_where_stoch_round_churns():
+    """The differential claim: a weight whose gradient alternates sign should
+    not move.  ef integrates it to nothing; stoch_round keeps flipping at
+    eta*|u| per step no matter how conflicted the signal is.
+    """
+
+    def total_flips(rule):
+        params = ternary_params((64, 64), seed=2)
+        tx = stochastic_sign(0.3, b1=0.0, momentum_dtype="none", rule=rule,
+                             residual_dtype="float32")
+        state = tx.init(params)
+        flips = 0.0
+        for i in range(40):
+            sign = 1.0 if i % 2 == 0 else -1.0
+            g = {"w": sign * jnp.ones((64, 64), jnp.float32)}
+            upd, state = tx.update(g, state, params)
+            flips += float(flip_stats(upd, params)["flip_rate"])
+            params = optax.apply_updates(params, upd)
+        return flips
+
+    assert total_flips("ef") == 0.0
+    assert total_flips("stoch_round") > 1.0
+
+
+def test_ef_hysteresis_delays_the_flip_back():
+    """After a fire, reversing the gradient must overcome 2h of integrated
+    counter-evidence before the weight flips back (Schmitt trigger), where
+    h = sign_threshold.  With h = 0 the flip-back is immediate.
+    """
+
+    def steps_to_flip_back(h):
+        params = {"w": jnp.zeros((8, 8), jnp.int8)}
+        tx = stochastic_sign(0.1, b1=0.0, momentum_dtype="none", rule="ef",
+                             threshold=h, residual_dtype="float32")
+        state = tx.init(params)
+        g = {"w": jnp.ones((8, 8), jnp.float32)}
+        for _ in range(20):  # push until the first fire (to w = -1)
+            upd, state = tx.update(g, state, params)
+            params = optax.apply_updates(params, upd)
+            if float(jnp.mean(params["w"])) < 0:
+                break
+        assert float(jnp.mean(params["w"])) == -1.0
+        g = {"w": -jnp.ones((8, 8), jnp.float32)}
+        for back in range(1, 30):
+            upd, state = tx.update(g, state, params)
+            params = optax.apply_updates(params, upd)
+            if float(jnp.mean(params["w"])) > -1.0:
+                return back
+        return 30
+
+    assert steps_to_flip_back(0.0) == 1
+    assert steps_to_flip_back(0.2) > 2
+
+
+def test_ef_hysteresis_does_not_dead_zone_small_directions():
+    """Regression: the stochastic rules' dead-zone filter must not apply to ef.
+
+    With hysteresis set, direction components with |u| < threshold still have
+    to accumulate in the residual and fire eventually - that is the entire
+    point of error feedback.  Here 99 of 100 entries normalize to |u| ~ 0.1,
+    below the 0.2 hysteresis, and every one of them must still flip.
+    """
+    params = {"w": jnp.zeros((10, 10), jnp.int8)}
+    tx = stochastic_sign(0.1, b1=0.0, momentum_dtype="none", rule="ef",
+                         threshold=0.2, residual_dtype="float32")
+    state = tx.init(params)
+    g = jnp.full((10, 10), 0.1, jnp.float32).at[0, 0].set(10.0)
+    for _ in range(90):
+        upd, state = tx.update({"w": g}, state, params)
+        params = optax.apply_updates(params, upd)
+    assert float(jnp.mean(params["w"] == -1)) == 1.0
+
+
+def test_ef_residual_stays_bounded():
+    params = ternary_params((32, 32), seed=3)
+    bound = 0.5 + 0.1
+    tx = stochastic_sign(0.4, rule="ef", threshold=0.1, residual_dtype="float32")
+    state = tx.init(params)
+    for i in range(25):
+        g = {"w": jax.random.normal(jax.random.PRNGKey(i), (32, 32))}
+        upd, state = tx.update(g, state, params)
+        params = optax.apply_updates(params, upd)
+        assert float(jnp.max(jnp.abs(state.err["w"]))) <= bound + 1e-6
+
+
+def test_ef_int8_residual_write_is_unbiased():
+    from tri.sign_opt import _read_res, _write_res
+
+    e = jnp.full((4000,), 0.1234, jnp.float32)
+    q = _write_res(e, "int8", 0.5, jax.random.PRNGKey(0))
+    back = _read_res(q, "int8", 0.5)
+    assert q.dtype == jnp.int8
+    # one int8 quantum is 0.5/127 ~ 0.0039; the *mean* must sit far inside it
+    assert abs(float(jnp.mean(back)) - 0.1234) < 5e-4
+
+
+def test_ef_int8_residual_accumulates_below_quantum_steps():
+    """eta = 0.001 moves the residual by a quarter of an int8 quantum per step.
+    Round-to-nearest writes would freeze forever; stochastic writes must keep
+    accumulating in expectation and eventually fire.
+    """
+    params = ternary_params((32, 32), seed=4)
+    tx = stochastic_sign(0.001, b1=0.0, momentum_dtype="none", rule="ef",
+                         residual_dtype="int8")
+    state = tx.init(params)
+    g = {"w": jnp.ones((32, 32), jnp.float32)}
+    start = float(jnp.mean(params["w"]))
+    step = jax.jit(lambda s, p: tx.update(g, s, p))
+    for _ in range(1200):
+        upd, state = step(state, params)
+        params = optax.apply_updates(params, upd)
+    assert float(jnp.mean(params["w"])) < start - 0.3
+
+
+def test_ef_state_bits_match_the_old_default_at_int8():
+    """The headline: ef with int8 momentum + int8 residual costs exactly what
+    stoch_round + fp16 momentum did - 18 bits - while carrying the latent's
+    fractional position instead of extra momentum mantissa.
+    """
+    from tri.quant import bits_per_weight
+
+    assert bits_per_weight("int8", residual_dtype="int8") == 18.0
+    oc = OptimConfig(sign_rule="ef", sign_momentum_dtype="int8", sign_residual_dtype="int8")
+    assert state_bits_per_weight(oc, "sign") == 18.0
+    # default ef config: fp16 momentum + int8 residual
+    oc = OptimConfig(sign_rule="ef")
+    assert state_bits_per_weight(oc, "sign") == 26.0
+    assert state_bits_per_weight(oc, "sign") < state_bits_per_weight(oc, "ste")
+
+
+def test_non_ef_rules_keep_no_residual_buffer():
+    params = ternary_params((16, 16))
+    tx = stochastic_sign(0.1, rule="stoch_round")
+    state = tx.init(params)
+    err_size = sum(x.size for x in jax.tree_util.tree_leaves(state.err))
+    assert err_size <= 1
 
 
 @pytest.mark.parametrize("b2", [0.0, 0.51, 0.999])

@@ -113,11 +113,16 @@ def unpack2(packed: jnp.ndarray, shape: tuple[int, ...]) -> jnp.ndarray:
     return (codes[:n].astype(jnp.int8) - 1).reshape(shape)
 
 
-def bits_per_weight(momentum_dtype: str, track_oscillation: bool = False) -> float:
+def bits_per_weight(
+    momentum_dtype: str,
+    track_oscillation: bool = False,
+    residual_dtype: str | None = None,
+) -> float:
     """Persistent training state per ternary weight, in bits.
 
     Useful for the README table and for keeping the project honest: a
-    momentum buffer is not free.
+    momentum buffer is not free, and neither is the ``ef`` rule's residual
+    (``residual_dtype``; None for the rules that keep no residual).
     """
     per_state = {
         "none": 0,
@@ -128,4 +133,7 @@ def bits_per_weight(momentum_dtype: str, track_oscillation: bool = False) -> flo
     }
     if momentum_dtype not in per_state:
         raise ValueError(f"unknown momentum dtype {momentum_dtype!r}")
-    return 2.0 + per_state[momentum_dtype] + (8.0 if track_oscillation else 0.0)
+    if residual_dtype is not None and residual_dtype not in per_state:
+        raise ValueError(f"unknown residual dtype {residual_dtype!r}")
+    res = per_state[residual_dtype] if residual_dtype is not None else 0
+    return 2.0 + per_state[momentum_dtype] + res + (8.0 if track_oscillation else 0.0)

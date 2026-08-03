@@ -133,7 +133,7 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
     # the rule and giving each one its own study is the only way to compare
     # them on equal budget.
     rule = fix_rule or trial.suggest_categorical(
-        "sign_rule", ["stoch_round", "stoch_flip", "bop"]
+        "sign_rule", ["stoch_round", "stoch_flip", "bop", "ef"]
     )
     space = {
         "sign_rule": rule,
@@ -164,6 +164,11 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
         # once; the observed optima for both rules landed near 0.011, so the
         # theory was wrong and the extra decade only diluted the search.
         space["sign_step"] = trial.suggest_float("sign_step", 3e-3, 5e-1, log=True)
+    if rule == "ef":
+        # For ef the threshold is a hysteresis half-width in lattice units, not
+        # a |u| cutoff: 0 is legal (pure integrate-and-fire) and the useful
+        # range is a fraction of a cell, so search it linearly, not log.
+        space["sign_threshold"] = trial.suggest_float("sign_threshold", 0.0, 0.2)
     return space
 
 
@@ -220,6 +225,9 @@ def _study_fn(study: str, trial, fix_rule: str | None = None, fix_quant: str | N
             {"quant": "sign"},
             {},
             {
+                # fix_rule lets the loss-per-bit question be asked of any rule;
+                # for `ef` the state accounting picks up the residual bits.
+                "sign_rule": fix_rule,
                 "sign_momentum_dtype": dt,
                 "sign_step": trial.suggest_float("sign_step", 3e-3, 5e-1, log=True),
                 "sign_b1": trial.suggest_float("sign_b1", 0.0, 0.98),
@@ -244,7 +252,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "(5090 209.5 | TPU v5e 197 | TPU v6e 918 | A100 312 | H100 989)")
     ap.add_argument("--out-dir", default="runs/ablate")
     ap.add_argument("--tag", default="", help="suffix separating this study's outputs from earlier ones")
-    ap.add_argument("--fix-rule", default=None, choices=["stoch_round", "stoch_flip", "bop"],
+    ap.add_argument("--fix-rule", default=None,
+                    choices=["stoch_round", "stoch_flip", "bop", "ef"],
                     help="pin sign_rule so each rule can be tuned on an equal budget; "
                          "TPE otherwise starves whichever rule loses early")
     ap.add_argument("--fix-loops", type=int, default=None, choices=[1, 2, 3, 4, 5],
