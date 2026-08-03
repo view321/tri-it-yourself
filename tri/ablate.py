@@ -30,6 +30,24 @@ from .optim import state_bits_per_weight
 from .train import train
 
 
+def check_objective_is_learnable(preset: str, dataset: str | None) -> None:
+    """Refuse to tune against a constant objective.
+
+    ``synthetic`` is uniform random tokens: its loss floor is exactly
+    ln(vocab_size), so every trial returns the same number and the search
+    optimizes sampling noise.  It exists to measure throughput, not to train on.
+    """
+    _, tc, _ = build_configs(preset, {}, {"dataset": dataset}, {})
+    if tc.dataset == "synthetic":
+        raise SystemExit(
+            "refusing to run a study on --dataset synthetic: those are uniform "
+            "random tokens, so val loss is ln(vocab_size) for every trial no "
+            "matter the hyperparameters.\n"
+            "  real tokens:  --dataset bin --data-dir data   (see tri.prepare_data)\n"
+            "  toy signal:   --dataset induction             (no download needed)"
+        )
+
+
 def run_trial(
     preset: str,
     model_over: dict,
@@ -144,6 +162,7 @@ def main(argv=None):
     except ImportError as e:  # pragma: no cover
         raise SystemExit("`pip install optuna` to run ablations") from e
 
+    check_objective_is_learnable(args.preset, args.dataset)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     os.makedirs(args.out_dir, exist_ok=True)
     pruner = (

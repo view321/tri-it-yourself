@@ -19,7 +19,9 @@ class BinData:
     def __init__(self, path: str):
         if not os.path.exists(path):
             raise FileNotFoundError(
-                f"token file {path!r} not found - run scripts/prepare_data.py first"
+                f"token file {path!r} not found - build one with "
+                "`python -m tri.prepare_data --out-dir data`, or use "
+                "--dataset induction for a toy task that needs no download"
             )
         self.path = path
         self.tokens = np.memmap(path, dtype=np.uint16, mode="r")

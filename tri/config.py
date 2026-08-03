@@ -240,7 +240,7 @@ PRESETS: dict[str, dict] = {
         ),
         train=dict(
             batch_size=16, grad_accum=2, total_steps=2000, eval_every=250,
-            loop_lo=1, loop_hi=3, eval_loops=(1, 2, 3, 4),
+            loop_lo=1, loop_hi=3, eval_loops=(1, 2, 3, 4), dataset="bin",
         ),
     ),
     # ~50M: sanity bridge between ablation and the main run.
@@ -249,7 +249,8 @@ PRESETS: dict[str, dict] = {
             vocab_size=32768, d_model=640, n_heads=10, n_prelude=2, n_core=3, n_coda=2,
             n_loops=2, seq_len=1024,
         ),
-        train=dict(batch_size=16, grad_accum=4, total_steps=6000, eval_every=500),
+        train=dict(batch_size=16, grad_accum=4, total_steps=6000, eval_every=500,
+                   dataset="bin"),
     ),
     # The recommended 2-day run on a single 32GB card.
     "main": dict(
@@ -259,7 +260,7 @@ PRESETS: dict[str, dict] = {
         ),
         train=dict(
             batch_size=16, grad_accum=16, total_steps=12000, eval_every=500,
-            eval_batches=40, ckpt_every=1000, loop_lo=2, loop_hi=4,
+            eval_batches=40, ckpt_every=1000, loop_lo=2, loop_hi=4, dataset="bin",
         ),
     ),
 }

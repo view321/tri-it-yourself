@@ -199,8 +199,13 @@ MFU than on a GPU. Budget a few minutes of XLA compile time, once per distinct l
 Tune the sign optimizer first — the flip-rate schedule is the most sensitive knob in the project:
 
 ```bash
-python -m tri.ablate --study sign --trials 40 --preset tiny --steps 800
+python -m tri.ablate --study sign --trials 40 --preset tiny --steps 800 --dataset bin --data-dir data
 ```
+
+**Always pass a learnable `--dataset`.** `synthetic` is uniform random tokens whose loss floor is
+exactly `ln(vocab_size)`, so every trial scores the same and the search optimizes sampling noise;
+`tri.ablate` now refuses to start on it. If you want to exercise the harness before the data download
+finishes, use `--dataset induction` — a real signal with a known floor, and no tokens required.
 
 | study | question |
 |---|---|

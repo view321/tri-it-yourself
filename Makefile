@@ -15,10 +15,12 @@ sizes:
 	$(PY) -c "from tri.config import build_configs, PRESETS; \
 	[print(p, build_configs(p)[0].param_counts()) for p in PRESETS]"
 
+DATA ?= --dataset bin --data-dir data
+
 ablate:
-	$(PY) -m tri.ablate --study sign  --trials 40 --preset tiny --steps 800
-	$(PY) -m tri.ablate --study modes --trials 24 --preset tiny --steps 800
-	$(PY) -m tri.ablate --study loops --trials 8  --preset tiny --steps 800
+	$(PY) -m tri.ablate --study sign  --trials 40 --preset tiny --steps 800 $(DATA)
+	$(PY) -m tri.ablate --study modes --trials 24 --preset tiny --steps 800 $(DATA)
+	$(PY) -m tri.ablate --study loops --trials 8  --preset tiny --steps 800 $(DATA)
 
 main:
 	$(PY) -m tri.train --preset main --quant sign --dataset bin --data-dir data --ckpt-every 1000

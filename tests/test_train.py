@@ -129,3 +129,22 @@ def test_induction_rejects_period_longer_than_sequence():
 def test_synthetic_floor_is_uniform():
     d = SyntheticData(256)
     assert abs(d.loss_floor - np.log(256)) < 1e-6
+
+
+def test_ablate_refuses_a_constant_objective():
+    """`synthetic` has loss floor ln(vocab) by construction: nothing to tune."""
+    from tri.ablate import check_objective_is_learnable
+
+    with pytest.raises(SystemExit, match="uniform random tokens"):
+        check_objective_is_learnable("tiny", "synthetic")
+    # a learnable task passes
+    check_objective_is_learnable("tiny", "induction")
+
+
+def test_real_data_presets_do_not_default_to_synthetic():
+    """A silent default of random tokens made a 2h TPU study measure noise."""
+    from tri.config import build_configs
+
+    for preset in ("tiny", "small", "main"):
+        _, tc, _ = build_configs(preset)
+        assert tc.dataset != "synthetic", f"{preset} would train on noise"
