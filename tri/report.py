@@ -36,6 +36,41 @@ def _split_params(trials: list[dict]) -> tuple[list[str], list[str]]:
     return sorted(cat), sorted(num)
 
 
+def _ranks(xs: list[float]) -> list[float]:
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    out = [0.0] * len(xs)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and xs[order[j + 1]] == xs[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for m in range(i, j + 1):
+            out[order[m]] = avg
+        i = j + 1
+    return out
+
+
+def spearman(xs: list[float], ys: list[float]) -> float | None:
+    """Rank correlation, computed without scipy.
+
+    Reported alongside the top-quartile spread because that spread is partly a
+    measure of how tightly TPE converged: once it locks onto a basin the best
+    trials are near-duplicates and *every* knob looks "determined".  A
+    correlation over all completed trials is a weaker but less circular signal
+    of whether a knob actually moves the objective.
+    """
+    n = len(xs)
+    if n < 5:
+        return None
+    rx, ry = _ranks(xs), _ranks(ys)
+    mx, my = sum(rx) / n, sum(ry) / n
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    dx = math.sqrt(sum((a - mx) ** 2 for a in rx))
+    dy = math.sqrt(sum((b - my) ** 2 for b in ry))
+    return num / (dx * dy) if dx > 0 and dy > 0 else None
+
+
 def _fmt(v) -> str:
     if isinstance(v, float):
         return f"{v:.4g}"
@@ -183,10 +218,19 @@ def report(path: str, top: int = 8, uniform: float | None = None,
                 elif pos > 0.80:
                     verdict = "AT UPPER EDGE - widen the search range upward"
             scale = "log" if logscale else "lin"
+            pairs = [(t["params"][p], t["val_ce"]) for t in done if p in t["params"]]
+            rho = spearman([f(x) for x, _ in pairs], [y for _, y in pairs])
+            rho_s = f"rho={rho:+.2f}" if rho is not None else "rho=n/a"
             print(
                 f"  {p:<18} top: {vals[0]:.4g} .. {vals[-1]:.4g} (median {vals[len(vals)//2]:.4g})"
-                f"  searched {b_lo:.4g} .. {b_hi:.4g} [{scale}]  covers {cover:>4.0%}  {verdict}"
+                f"  searched {b_lo:.4g} .. {b_hi:.4g} [{scale}]  covers {cover:>4.0%}"
+                f"  {rho_s}  {verdict}"
             )
+        print(
+            "  rho = rank correlation with val_ce over all completed trials;"
+            " |rho| near 0 means\n  the knob did not move the objective, however"
+            " tightly the top trials cluster."
+        )
     return s
 
 

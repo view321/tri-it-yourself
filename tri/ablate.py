@@ -109,12 +109,6 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
     )
     space = {
         "sign_rule": rule,
-        # Left at 3e-3.  A brief detour widened this to 3e-4 on the theory that
-        # `stoch_round` needs a much smaller step because it can move two
-        # lattice points at once; the observed optima for both rules then landed
-        # near 0.011, so the theory was wrong and the extra decade only diluted
-        # the search.  Both rules appear to want a similar step.
-        "sign_step": trial.suggest_float("sign_step", 3e-3, 5e-1, log=True),
         "sign_b1": trial.suggest_float("sign_b1", 0.0, 0.98),
         # [0, 1) is the natural domain of an EMA decay and there is no principled
         # reason to exclude the short-memory end; b2=0 simply means "no memory".
@@ -126,7 +120,19 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
         "muon_lr": trial.suggest_float("muon_lr", 2e-3, 1e-1, log=True),
     }
     if rule == "bop":
-        space["sign_threshold"] = trial.suggest_float("sign_threshold", 1e-3, 1.0, log=True)
+        # bop flips when eta*|u| > threshold, so eta and threshold are
+        # degenerate: only their ratio changes behaviour, and searching both
+        # burns a dimension while making neither value interpretable.  Pin eta
+        # at 1.0 - it still carries the schedule shape, annealing the flip rate
+        # over training - and search the |u| cutoff directly.
+        space["sign_step"] = 1.0
+        space["sign_threshold"] = trial.suggest_float("sign_threshold", 1e-2, 5e1, log=True)
+    else:
+        # A brief detour widened this to 3e-4 on the theory that `stoch_round`
+        # needs a much smaller step because it can move two lattice points at
+        # once; the observed optima for both rules landed near 0.011, so the
+        # theory was wrong and the extra decade only diluted the search.
+        space["sign_step"] = trial.suggest_float("sign_step", 3e-3, 5e-1, log=True)
     return space
 
 

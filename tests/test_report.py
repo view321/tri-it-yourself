@@ -204,3 +204,58 @@ def test_cross_table_exposes_an_interaction_a_marginal_hides(tmp_path, capsys):
 def test_cross_table_handles_a_missing_param(tmp_path, capsys):
     report(make_summary(tmp_path, [trial(0, 5.0, 0.01)]), cross=("sign_rule", "nope"))
     assert "no completed trials carry both" in capsys.readouterr().out
+
+
+def test_spearman_matches_known_cases():
+    from tri.report import spearman
+
+    assert spearman([1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6]) == pytest.approx(1.0)
+    assert spearman([1, 2, 3, 4, 5, 6], [6, 5, 4, 3, 2, 1]) == pytest.approx(-1.0)
+    assert spearman([1, 2, 3], [1, 2, 3]) is None  # too few points to be meaningful
+    assert spearman([1, 1, 1, 1, 1, 1], [1, 2, 3, 4, 5, 6]) is None  # no variance
+
+
+def test_rho_flags_a_knob_that_does_not_move_the_objective(tmp_path, capsys):
+    """A converged TPE makes every knob look 'determined'; rho should not."""
+    # sign_step is irrelevant here: val_ce is driven purely by trial index
+    rows = [
+        {"trial": i, "val_ce": 5.0 + 0.01 * i, "pruned": False,
+         "params": {"sign_step": s}}
+        for i, s in enumerate([0.01, 0.4, 0.02, 0.3, 0.011, 0.25, 0.012, 0.2])
+    ]
+    report(make_summary(tmp_path, rows))
+    out = capsys.readouterr().out
+    assert "rho=" in out
+    assert "rank correlation with val_ce" in out
+
+
+def test_bop_pins_the_step_and_searches_the_cutoff(tmp_path):
+    """eta and threshold are degenerate for bop, so only one may be searched."""
+    optuna = pytest.importorskip("optuna")
+    from tri.ablate import _sign_space
+
+    seen = []
+
+    def objective(trial):
+        seen.append(_sign_space(trial, fix_rule="bop"))
+        return 1.0
+
+    study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
+    study.optimize(objective, n_trials=5)
+
+    assert all(s["sign_step"] == 1.0 for s in seen)
+    assert all("sign_step" not in t.params for t in study.trials)
+    assert all("sign_threshold" in t.params for t in study.trials)
+    assert len({s["sign_threshold"] for s in seen}) > 1
+
+
+def test_non_bop_rules_still_search_the_step(tmp_path):
+    optuna = pytest.importorskip("optuna")
+    from tri.ablate import _sign_space
+
+    seen = []
+    study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0))
+    study.optimize(lambda t: (seen.append(_sign_space(t, fix_rule="stoch_flip")), 1.0)[1],
+                   n_trials=5)
+    assert len({s["sign_step"] for s in seen}) > 1
+    assert all("sign_threshold" not in s for s in seen)
