@@ -168,3 +168,17 @@ def test_prepare_data_preflight_names_missing_packages(monkeypatch):
         preflight("bpe32k")
     with pytest.raises(SystemExit, match="tiktoken"):
         preflight("gpt2")
+
+
+def test_ablate_cli_accepts_the_documented_flags():
+    """The README command must actually parse; --data-dir once did not exist."""
+    import shlex
+
+    from tri.ablate import build_parser
+
+    args = build_parser().parse_args(shlex.split(
+        "--study sign --trials 40 --preset tiny --steps 800 "
+        "--dataset bin --data-dir data --device-tflops 918"
+    ))
+    assert args.data_dir == "data" and args.device_tflops == 918.0
+    assert args.dataset == "bin"

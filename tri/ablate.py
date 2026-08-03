@@ -14,7 +14,8 @@ the real run:
 ``momentum``  what the momentum buffer actually buys, in val loss per bit.
 
 Example:
-    python -m tri.ablate --study sign --trials 40 --preset tiny --steps 800
+    python -m tri.ablate --study sign --trials 40 --preset tiny --steps 800 \
+        --dataset bin --data-dir data
 """
 
 from __future__ import annotations
@@ -141,21 +142,31 @@ def _study_fn(study: str, trial):
     raise ValueError(f"unknown study {study!r}")
 
 
-def main(argv=None):
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Ablations for tri-it-yourself")
     ap.add_argument("--study", default="sign", choices=["sign", "modes", "loops", "momentum"])
     ap.add_argument("--trials", type=int, default=30)
     ap.add_argument("--preset", default="tiny")
     ap.add_argument("--steps", type=int, default=800)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--dataset", default=None)
+    ap.add_argument("--dataset", default=None, choices=["synthetic", "induction", "bin"])
+    ap.add_argument("--data-dir", default=None, help="directory holding train.bin / val.bin")
+    ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--grad-accum", type=int, default=None)
+    ap.add_argument("--device-tflops", type=float, default=None,
+                    help="peak dense BF16 TFLOPS for MFU logging "
+                         "(5090 209.5 | TPU v5e 197 | TPU v6e 918 | A100 312 | H100 989)")
     ap.add_argument("--out-dir", default="runs/ablate")
     ap.add_argument("--storage", default=None, help="e.g. sqlite:///runs/ablate/study.db")
     ap.add_argument("--eval-every", type=int, default=None)
     ap.add_argument("--time-budget-s", type=float, default=0.0, help="per trial")
     ap.add_argument("--no-prune", action="store_true")
     ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
 
     try:
         import optuna
@@ -192,6 +203,10 @@ def main(argv=None):
                 "total_steps": args.steps,
                 "seed": args.seed,
                 "dataset": args.dataset,
+                "data_dir": args.data_dir,
+                "batch_size": args.batch_size,
+                "grad_accum": args.grad_accum,
+                "device_tflops": args.device_tflops,
                 "eval_every": args.eval_every or max(1, args.steps // 6),
                 "time_budget_s": args.time_budget_s,
             }
