@@ -49,6 +49,23 @@ def check_objective_is_learnable(preset: str, dataset: str | None) -> None:
         )
 
 
+def _preserve_existing(path: str) -> str | None:
+    """Move an existing summary aside instead of overwriting it.
+
+    Re-running a study with a changed search space is the normal workflow, and
+    silently destroying the result you are comparing against is not acceptable.
+    """
+    if not os.path.exists(path):
+        return None
+    stem, ext = os.path.splitext(path)
+    n = 1
+    while os.path.exists(f"{stem}.prev{n}{ext}"):
+        n += 1
+    dest = f"{stem}.prev{n}{ext}"
+    os.replace(path, dest)
+    return dest
+
+
 def run_trial(
     preset: str,
     model_over: dict,
@@ -160,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="peak dense BF16 TFLOPS for MFU logging "
                          "(5090 209.5 | TPU v5e 197 | TPU v6e 918 | A100 312 | H100 989)")
     ap.add_argument("--out-dir", default="runs/ablate")
+    ap.add_argument("--tag", default="", help="suffix separating this study's outputs from earlier ones")
     ap.add_argument("--storage", default=None, help="e.g. sqlite:///runs/ablate/study.db")
     ap.add_argument("--eval-every", type=int, default=None)
     ap.add_argument("--time-budget-s", type=float, default=0.0, help="per trial")
@@ -179,13 +197,14 @@ def main(argv=None):
     check_objective_is_learnable(args.preset, args.dataset)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     os.makedirs(args.out_dir, exist_ok=True)
+    tag = f"-{args.tag}" if args.tag else ""
     pruner = (
         optuna.pruners.NopPruner()
         if args.no_prune
         else optuna.pruners.MedianPruner(n_startup_trials=4, n_warmup_steps=1)
     )
     study = optuna.create_study(
-        study_name=f"{args.study}-{args.preset}",
+        study_name=f"{args.study}{tag}-{args.preset}",
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=args.seed),
         pruner=pruner,
@@ -205,7 +224,10 @@ def main(argv=None):
         train_o = dict(train_o)
         train_o.update(
             {
-                "run_name": f"{args.study}/t{trial.number:03d}",
+                # Tagging the directory keeps a re-run's per-trial log.jsonl from
+                # being appended to the previous study's, which would interleave
+                # two different search spaces in one file.
+                "run_name": f"{args.study}{tag}/t{trial.number:03d}",
                 "out_dir": args.out_dir,
                 "total_steps": args.steps,
                 "seed": args.seed,
@@ -257,7 +279,10 @@ def main(argv=None):
         "best_params": study.best_params,
         "wall_s": time.time() - t0,
     }
-    path = os.path.join(args.out_dir, f"{args.study}_summary.json")
+    path = os.path.join(args.out_dir, f"{args.study}{tag}_summary.json")
+    preserved = _preserve_existing(path)
+    if preserved:
+        print(f"previous summary kept at {preserved}")
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
 

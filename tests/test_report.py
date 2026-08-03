@@ -99,3 +99,26 @@ def test_recorded_distributions_beat_guessing_the_scale(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[lin]" in out
     assert "EDGE" not in out
+
+
+def test_existing_summary_is_preserved_not_overwritten(tmp_path):
+    """Re-running a study must not destroy the result you compare against."""
+    from tri.ablate import _preserve_existing
+
+    p = tmp_path / "sign_summary.json"
+    p.write_text('{"study": "first"}')
+    first = _preserve_existing(str(p))
+    assert first and json.loads(open(first).read())["study"] == "first"
+    assert not p.exists()
+
+    p.write_text('{"study": "second"}')
+    second = _preserve_existing(str(p))
+    assert second != first  # does not clobber the first backup either
+    assert json.loads(open(second).read())["study"] == "second"
+    assert json.loads(open(first).read())["study"] == "first"
+
+
+def test_preserve_is_a_noop_when_nothing_exists(tmp_path):
+    from tri.ablate import _preserve_existing
+
+    assert _preserve_existing(str(tmp_path / "absent.json")) is None
