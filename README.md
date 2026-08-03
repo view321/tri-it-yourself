@@ -253,6 +253,30 @@ It ranks categorical choices by best *and* mean, and for each numeric knob print
 quartile occupies. A knob whose winners cover most of the searched range is marked `UNRESOLVED`: the
 study did not determine it, however decisive the best value looks.
 
+## The comparison that actually matters
+
+Beating an unquantized `bf16` model was never the goal, and expecting it would be strange — more
+precision per weight is exactly what `bf16` has. But a float model that has to fit in 2 bits per
+weight does not get deployed in float, it gets quantized, and it loses something on the way. So the
+honest comparison is between things that occupy the same memory at inference:
+
+| | deploy bits/weight | training state bits/weight | role |
+|---|---|---|---|
+| `bf16`, unquantized | 16–32 | 64 | reference ceiling, not a competitor |
+| `bf16` → PTQ ternary | 2 | 64 | the "just quantize it afterwards" baseline |
+| `ste` (this *is* QAT) | 2 | 64 | the strong low-memory baseline |
+| `sign` | 2 | **18** | latent-free ternary |
+
+```bash
+python -m tri.ptq runs/modes-bf16/t000 --dataset bin --data-dir data --uniform 10.3972
+```
+
+`sign` has to beat the **PTQ** number to justify existing at all, and be competitive with `ste` while
+using a quarter of its training state. Two outcomes are worth something: matching `ste` (then the
+latent weights were never necessary, and you save 46 bits per weight while training), or beating PTQ
+by a wide margin (then training under the constraint really does let the model adapt to it, which is
+the interesting hypothesis). Losing to `ste` by less than the `bf16`→PTQ gap is still informative.
+
 ## What the CPU smoke test actually shows
 
 These are from the `smoke` preset — a **0.2M-parameter model on a synthetic period-8 copy task**,
