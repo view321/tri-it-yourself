@@ -252,6 +252,24 @@ PRESETS: dict[str, dict] = {
         train=dict(batch_size=16, grad_accum=4, total_steps=6000, eval_every=500,
                    dataset="bin"),
     ),
+    # Sized for a ~100-250h single-chip TPU v6e budget.  Wider than `main`
+    # because at 2 bits the block linears are nearly free and the fp16
+    # embedding table dominates deployment memory: growing d_model improves the
+    # ratio of ternary weights to dense ones (61% embedding here vs 72% at
+    # d=1024).  ~25B tokens at 0.5M/step is ~80 tokens/param, well past
+    # Chinchilla - which matters more for ternary than for float, since each
+    # weight carries ~1.58 bits and needs more data to place.
+    "wide": dict(
+        model=dict(
+            vocab_size=32768, d_model=1536, n_heads=12, n_prelude=2, n_core=5,
+            n_coda=2, n_loops=3, seq_len=2048,
+        ),
+        train=dict(
+            batch_size=16, grad_accum=16, total_steps=48000, eval_every=1000,
+            eval_batches=40, ckpt_every=500, keep_last=2, loop_lo=2, loop_hi=4,
+            dataset="bin", device_tflops=918.0,
+        ),
+    ),
     # The recommended 2-day run on a single 32GB card.
     "main": dict(
         model=dict(
