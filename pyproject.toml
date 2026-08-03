@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-data = ["datasets>=2.19", "tiktoken>=0.7"]
+data = ["datasets>=2.19", "tokenizers>=0.19", "tiktoken>=0.7"]
 tune = ["optuna>=3.6"]
 dev = ["pytest>=8.0", "optuna>=3.6"]
 

@@ -148,3 +148,23 @@ def test_real_data_presets_do_not_default_to_synthetic():
     for preset in ("tiny", "small", "main"):
         _, tc, _ = build_configs(preset)
         assert tc.dataset != "synthetic", f"{preset} would train on noise"
+
+
+def test_prepare_data_preflight_names_missing_packages(monkeypatch):
+    """Deps must be checked before streaming 200k docs for the BPE sample."""
+    import builtins
+
+    from tri.prepare_data import preflight
+
+    real = builtins.__import__
+
+    def blocked(name, *a, **k):
+        if name in ("tokenizers", "tiktoken", "datasets"):
+            raise ImportError(name)
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(SystemExit, match="tokenizers"):
+        preflight("bpe32k")
+    with pytest.raises(SystemExit, match="tiktoken"):
+        preflight("gpt2")
