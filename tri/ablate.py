@@ -241,13 +241,32 @@ def main(argv=None):
             }
         )
         for name, d in trial.distributions.items():
-            if hasattr(d, "low") and hasattr(d, "high"):
+            if hasattr(d, "choices"):
+                # Recording the choices lets the report distinguish "never
+                # sampled" from "sampled but never survived".
+                dists[name] = {"choices": [str(c) for c in d.choices]}
+            elif hasattr(d, "low") and hasattr(d, "high"):
                 dists[name] = {
                     "low": float(d.low),
                     "high": float(d.high),
                     "log": bool(getattr(d, "log", False)),
                 }
-        r = run_trial(args.preset, model_o, train_o, optim_o, trial, verbose=args.verbose)
+        try:
+            r = run_trial(args.preset, model_o, train_o, optim_o, trial, verbose=args.verbose)
+        except Exception as e:
+            # study.optimize(catch=...) would otherwise drop this trial from
+            # both the summary and stdout, making a configuration that always
+            # crashes indistinguishable from one that was never sampled.
+            rows.append({
+                "trial": trial.number,
+                "params": dict(trial.params),
+                "val_ce": None,
+                "pruned": False,
+                "failed": True,
+                "error": f"{type(e).__name__}: {e}",
+            })
+            print(f"trial {trial.number:>3}  FAILED  {type(e).__name__}: {e}", flush=True)
+            raise
         rows.append(
             {
                 "trial": trial.number,

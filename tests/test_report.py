@@ -66,7 +66,7 @@ def test_a_value_whose_trials_all_pruned_is_reported_not_dropped(tmp_path, capsy
     rows += [trial(10 + i, 9.0, 0.02, rule="stoch_round", pruned=True) for i in range(5)]
     report(make_summary(tmp_path, rows))
     out = capsys.readouterr().out
-    assert "stoch_round" in out and "ALL 5 SAMPLED TRIALS PRUNED" in out
+    assert "stoch_round" in out and "0 survived of 5 sampled (5 pruned)" in out
 
 
 def test_winners_pinned_to_a_search_bound_are_flagged(tmp_path, capsys):
@@ -122,3 +122,30 @@ def test_preserve_is_a_noop_when_nothing_exists(tmp_path):
     from tri.ablate import _preserve_existing
 
     assert _preserve_existing(str(tmp_path / "absent.json")) is None
+
+
+def test_never_sampled_choice_is_distinguished_from_always_pruned(tmp_path, capsys):
+    """The question this answers: absent because untried, or because it lost?"""
+    rows = [trial(i, 5.0 + 0.01 * i, 0.01, rule="stoch_flip") for i in range(4)]
+    rows += [trial(10 + i, 9.0, 0.02, rule="bop", pruned=True) for i in range(3)]
+    payload = {"study": "sign", "preset": "tiny", "steps": 3000, "trials": rows,
+               "distributions": {"sign_rule": {
+                   "choices": ["stoch_round", "stoch_flip", "bop"]}},
+               "best_value": 5.0, "best_params": {}}
+    p = tmp_path / "sign_summary.json"
+    p.write_text(json.dumps(payload))
+    report(str(p))
+    out = capsys.readouterr().out
+    assert "stoch_round" in out and "NEVER SAMPLED in 7 trials" in out
+    assert "bop" in out and "0 survived of 3 sampled" in out
+
+
+def test_failed_trials_are_counted_not_silently_dropped(tmp_path, capsys):
+    rows = [trial(i, 5.0 + 0.01 * i, 0.01, rule="stoch_flip") for i in range(4)]
+    rows += [{"trial": 10, "val_ce": None, "pruned": False, "failed": True,
+              "error": "RuntimeError: boom", "params": {"sign_step": 0.02,
+                                                        "sign_rule": "bop"}}]
+    report(make_summary(tmp_path, rows))
+    out = capsys.readouterr().out
+    assert "1 failed" in out
+    assert "0 survived of 1 sampled" in out and "failed" in out

@@ -18,7 +18,14 @@ import math
 
 
 def _completed(trials: list[dict]) -> list[dict]:
-    return [t for t in trials if not t.get("pruned") and math.isfinite(t.get("val_ce", math.inf))]
+    out = []
+    for t in trials:
+        if t.get("pruned") or t.get("failed"):
+            continue
+        v = t.get("val_ce")
+        if isinstance(v, (int, float)) and math.isfinite(v):
+            out.append(t)
+    return out
 
 
 def _split_params(trials: list[dict]) -> tuple[list[str], list[str]]:
@@ -46,7 +53,9 @@ def report(path: str, top: int = 8, uniform: float | None = None) -> dict:
     done.sort(key=lambda t: t["val_ce"])
 
     print(f"study={s.get('study')} preset={s.get('preset')} steps={s.get('steps')}")
-    print(f"{len(trials)} trials, {len(done)} completed, {len(trials)-len(done)} pruned")
+    npruned = sum(1 for t in trials if t.get("pruned"))
+    nfailed = sum(1 for t in trials if t.get("failed"))
+    print(f"{len(trials)} trials, {len(done)} completed, {npruned} pruned, {nfailed} failed")
     best = done[0]
     line = f"best val_ce {best['val_ce']:.4f}"
     if uniform:
@@ -70,28 +79,41 @@ def report(path: str, top: int = 8, uniform: float | None = None) -> dict:
         for p in cat:
             groups: dict = {}
             pruned: dict = {}
+            failed: dict = {}
             for t in done:
                 if p in t["params"]:
                     groups.setdefault(t["params"][p], []).append(t["val_ce"])
             for t in trials:
-                if t.get("pruned") and p in t.get("params", {}):
-                    pruned[t["params"][p]] = pruned.get(t["params"][p], 0) + 1
-            # A value that was sampled but never survived is a finding, not an
-            # absence; without this it silently vanishes from the table.
-            for v in pruned:
+                v = t.get("params", {}).get(p)
+                if v is None:
+                    continue
+                if t.get("failed"):
+                    failed[v] = failed.get(v, 0) + 1
+                elif t.get("pruned"):
+                    pruned[v] = pruned.get(v, 0) + 1
+            # A value sampled but never surviving is a finding, not an absence,
+            # and one never sampled at all is a different finding again.  Both
+            # vanish silently if only completed trials are tabulated.
+            for v in list(pruned) + list(failed) + dists.get(p, {}).get("choices", []):
                 groups.setdefault(v, [])
             if len(groups) < 2:
                 continue
             print(f"  {p}")
             for v, xs in sorted(groups.items(), key=lambda kv: min(kv[1]) if kv[1] else math.inf):
                 share = sum(1 for t in head if t["params"].get(p) == v)
-                npr = pruned.get(v, 0)
+                npr, nfa = pruned.get(v, 0), failed.get(v, 0)
                 if not xs:
-                    print(f"    {str(v):<12} n=0   ALL {npr} SAMPLED TRIALS PRUNED")
+                    if npr or nfa:
+                        why = f"{npr} pruned" + (f", {nfa} failed" if nfa else "")
+                        print(f"    {str(v):<12} 0 survived of {npr + nfa} sampled ({why})")
+                    else:
+                        print(f"    {str(v):<12} NEVER SAMPLED in {len(trials)} trials")
                     continue
+                tail = f"  ({npr} pruned)" if npr else ""
+                tail += f"  ({nfa} FAILED)" if nfa else ""
                 print(
                     f"    {str(v):<12} n={len(xs):<3} best={min(xs):.4f} "
-                    f"mean={sum(xs)/len(xs):.4f}  {share}/{k} of top  ({npr} pruned)"
+                    f"mean={sum(xs)/len(xs):.4f}  {share}/{k} of top{tail}"
                 )
 
     if num:
