@@ -174,8 +174,10 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
     if rule == "ef":
         # For ef the threshold is a hysteresis half-width in lattice units, not
         # a |u| cutoff: 0 is legal (pure integrate-and-fire) and the useful
-        # range is a fraction of a cell, so search it linearly, not log.
-        space["sign_threshold"] = trial.suggest_float("sign_threshold", 0.0, 0.2)
+        # range is a fraction of a cell, so search it linearly, not log.  It
+        # gets its own Optuna name: reusing "sign_threshold" would clash with
+        # bop's log distribution in an unpinned study, which Optuna rejects.
+        space["sign_threshold"] = trial.suggest_float("sign_threshold_ef", 0.0, 0.2)
     return space
 
 
