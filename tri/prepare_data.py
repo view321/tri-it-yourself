@@ -133,8 +133,16 @@ def _source_stream(dataset: str, config: str | None, split: str, key: str, skip:
         yield rec[key]
 
 
-def _mix_stream(specs, split: str, skips: dict[str, int] | None = None, seed: int = 0):
-    """Interleave the sources by weight into one text stream."""
+def _mix_stream(specs, split: str, skips: dict[str, int] | None = None, seed: int = 0,
+                skip_docs: int = 0):
+    """Interleave the sources by weight into one text stream.
+
+    ``skips`` drops each source's val documents; ``skip_docs`` then skips into
+    the *mixed* stream, which is deterministic given (specs, skips, seed) - the
+    resume mechanism for sharded runs.  Skipping is linear in the distance (the
+    stream is iterated and discarded), so a restart deep into a long prep pays
+    download time but no tokenization time for the skipped span.
+    """
     from datasets import interleave_datasets
 
     skips = skips or {}
@@ -147,9 +155,14 @@ def _mix_stream(specs, split: str, skips: dict[str, int] | None = None, seed: in
         if key != "text":
             d = d.rename_column(key, "text")
         streams.append(d)
-    mixed = interleave_datasets(
-        streams, probabilities=[w for *_, w in specs], seed=seed
-    )
+    if len(streams) == 1:
+        mixed = streams[0]
+    else:
+        mixed = interleave_datasets(
+            streams, probabilities=[w for *_, w in specs], seed=seed
+        )
+    if skip_docs:
+        mixed = mixed.skip(skip_docs)
     for rec in mixed:
         yield rec["text"]
 
@@ -276,6 +289,110 @@ def _write_bin(texts, encode_batch, path: str, max_tokens: int, batch_docs: int,
     return written, docs
 
 
+def _save_json_atomic(obj, path: str) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _validate_parts(manifest: dict, out_dir: str) -> None:
+    """Drop manifest entries whose files are missing or short.
+
+    Parts record *cumulative* document positions, so only a trailing run of
+    bad parts can be pruned - the first invalid part invalidates everything
+    after it.  (Typically this is one part that a crash or an interrupted
+    download left incomplete.)
+    """
+    good = []
+    for p in manifest.get("parts", []):
+        path = os.path.join(out_dir, p["file"])
+        if os.path.exists(path) and os.path.getsize(path) == p["tokens"] * 2:
+            good.append(p)
+        else:
+            break
+    dropped = len(manifest.get("parts", [])) - len(good)
+    if dropped:
+        print(f"  [train] dropping {dropped} incomplete part(s); resuming before them",
+              flush=True)
+    manifest["parts"] = good
+
+
+def _write_train_sharded(make_stream, encode_batch, out_dir: str, max_tokens: int,
+                         shard_tokens: int, batch_docs: int, manifest: dict,
+                         save_manifest) -> int:
+    """Write the train stream as ``train_partNNNN.bin`` shards with exact resume.
+
+    After each completed part the manifest records the part's token count and
+    the cumulative *document* position in the mixed stream; a restart rebuilds
+    the same deterministic stream, skips to that position, and continues with
+    the next part.  A crash loses at most the in-flight token buffer (~4M
+    tokens) and never duplicates data.
+    """
+    parts = manifest.setdefault("parts", [])
+    tokens_done = sum(p["tokens"] for p in parts)
+    docs_done = parts[-1]["docs"] if parts else 0
+    if tokens_done >= max_tokens:
+        return tokens_done
+    if parts:
+        print(f"  [train] resuming after {len(parts)} part(s), "
+              f"{tokens_done/1e9:.2f}B tokens (skipping {docs_done:,} docs)", flush=True)
+
+    texts = make_stream(docs_done)
+    buf: list[int] = []
+    batch: list[str] = []
+    docs = docs_done
+    exhausted = False
+    t0 = time.time()
+    done0 = tokens_done
+    next_report = tokens_done + 100_000_000
+
+    while tokens_done < max_tokens and not exhausted:
+        target = min(shard_tokens, max_tokens - tokens_done)
+        name = f"train_part{len(parts):04d}.bin"
+        path = os.path.join(out_dir, name)
+        written = 0
+        with open(path, "wb") as f:
+            while written < target:
+                while not exhausted and len(buf) < min(4_000_000, target - written):
+                    try:
+                        batch.append(next(texts))
+                        docs += 1
+                    except StopIteration:
+                        exhausted = True
+                    if len(batch) >= batch_docs or (exhausted and batch):
+                        for ids in encode_batch(batch):
+                            buf.extend(ids)
+                        batch = []
+                if not buf:
+                    break
+                n = min(len(buf), target - written)
+                np.asarray(buf[:n], np.uint16).tofile(f)
+                del buf[:n]
+                written += n
+                tokens_done += n
+                if tokens_done >= next_report:
+                    rate = (tokens_done - done0) / max(time.time() - t0, 1e-9)
+                    left = max(max_tokens - tokens_done, 0) / max(rate, 1e-9)
+                    print(
+                        f"  [train] {tokens_done/1e9:.2f}B / {max_tokens/1e9:.2f}B tokens "
+                        f"| {rate/1e6:.1f}M tok/s | ~{left/3600:.1f}h left",
+                        flush=True,
+                    )
+                    next_report += 100_000_000
+        if written:
+            parts.append({"file": name, "tokens": written, "docs": docs})
+            save_manifest()
+            print(f"  [train] {name} done ({written:,} tokens, {docs:,} docs total)",
+                  flush=True)
+        else:
+            os.remove(path)
+    manifest["train_tokens"] = tokens_done
+    manifest["complete"] = True
+    save_manifest()
+    return tokens_done
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Build train.bin / val.bin")
     ap.add_argument("--dataset", default="HuggingFaceFW/fineweb-edu")
@@ -296,6 +413,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="documents per encode_batch call")
     ap.add_argument("--threads", type=int, default=0, help="0 = all cores")
     ap.add_argument("--seed", type=int, default=0, help="mix interleaving seed")
+    ap.add_argument("--shard-tokens", type=int, default=0,
+                    help="write train as train_partNNNN.bin shards of this many "
+                         "tokens, with an incremental manifest and exact resume; "
+                         "re-running the same command continues where it stopped "
+                         "(concatenate parts into train.bin when done). 0 = one file.")
     return ap
 
 
@@ -305,6 +427,47 @@ def main(argv=None):
     preflight(args.tokenizer)
     os.makedirs(args.out_dir, exist_ok=True)
     specs = parse_mix(args.mix) if args.mix else None
+    if args.shard_tokens and not specs:
+        # One uniform sharded path: a single source is a one-entry mix.
+        specs = [("main", args.dataset, args.name, args.text_key, 1.0)]
+
+    # Sharded runs resume: the manifest must have been produced by the same
+    # settings, or the skip arithmetic silently builds a different corpus.
+    manifest_path = os.path.join(args.out_dir, "mix_manifest.json")
+    args_sig = {
+        "mix_specs": [list(s) for s in specs] if specs else None,
+        "split": args.split,
+        "seed": args.seed,
+        "val_tokens": args.val_tokens,
+        "shard_tokens": args.shard_tokens,
+        "vocab_size": args.vocab_size,
+        "tokenizer": args.tokenizer,
+    }
+    manifest = None
+    if args.shard_tokens and os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        if manifest.get("args") != args_sig:
+            raise SystemExit(
+                f"{manifest_path} was written with different settings; delete the "
+                "out dir (or pass matching flags) before resuming"
+            )
+        if not os.path.exists(os.path.join(args.out_dir, "tokenizer.json")):
+            raise SystemExit(
+                "manifest present but tokenizer.json missing - the corpus would be "
+                "retokenized inconsistently.  Delete the out dir to start over."
+            )
+        if manifest.get("complete") and manifest.get("train_tokens", 0) >= args.max_tokens:
+            print(
+                f"manifest says this prep is complete at "
+                f"{manifest['train_tokens']:,} tokens; nothing to do", flush=True
+            )
+            return
+        # A larger --max-tokens re-opens a finished prep: the writer appends
+        # parts from the recorded position and re-derives the flag.
+        manifest.pop("complete", None)
+    if args.shard_tokens and manifest is None:
+        manifest = {"args": args_sig, "val_docs_skipped": {}, "parts": []}
 
     def fresh_texts():
         if specs:
@@ -328,6 +491,45 @@ def main(argv=None):
     val_path = os.path.join(args.out_dir, "val.bin")
     train_path = os.path.join(args.out_dir, "train.bin")
     t_start = time.time()
+
+    if args.shard_tokens:
+        save_manifest = lambda: _save_json_atomic(manifest, manifest_path)  # noqa: E731
+        skips = manifest["val_docs_skipped"]
+        val_parts = [os.path.join(args.out_dir, f"val_{t}.bin") for t, *_ in specs]
+        if not (skips and all(os.path.exists(p) for p in val_parts)):
+            n_val = 0
+            for (tag, dataset, config, key, w), part in zip(specs, val_parts):
+                tokens, docs = _write_bin(
+                    _source_stream(dataset, config, args.split, key),
+                    encode_batch, part, max(1, int(args.val_tokens * w)),
+                    args.batch_docs, f"val:{tag}",
+                )
+                skips[tag] = docs
+                n_val += tokens
+            manifest["val_tokens"] = n_val
+            save_manifest()
+        with open(val_path, "wb") as out:
+            for part in val_parts:
+                with open(part, "rb") as g:
+                    out.write(g.read())
+        _validate_parts(manifest, args.out_dir)
+        save_manifest()
+
+        n_train = _write_train_sharded(
+            lambda skip: _mix_stream(specs, args.split, skips, args.seed, skip),
+            encode_batch, args.out_dir, args.max_tokens, args.shard_tokens,
+            args.batch_docs, manifest, save_manifest,
+        )
+        n_parts = len(manifest["parts"])
+        print(
+            f"done in {(time.time() - t_start)/60:.1f} min: {n_train:,} train tokens in "
+            f"{n_parts} part(s), {manifest.get('val_tokens', 0):,} val tokens in {args.out_dir}\n"
+            f"  stitch with: cat {args.out_dir}/train_part*.bin > {args.out_dir}/train.bin\n"
+            f"  (or server-side: gsutil compose ...part*.bin .../train.bin - "
+            "scripts/prep_to_gcs.sh does this for you)",
+            flush=True,
+        )
+        return
 
     if not specs:
         # Single source, single pass: val is the head of the stream, train the rest.

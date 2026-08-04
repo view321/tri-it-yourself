@@ -166,10 +166,16 @@ bash scripts/tpu_create_spot.sh                  # spot v6e-1 (see tpu_env.sh fo
 gcloud compute tpus tpu-vm ssh tri-spot --zone=us-east1-d      # then, on the VM:
   git clone https://github.com/view321/tri-it-yourself && cd tri-it-yourself
   pip install -U "jax[tpu]" && pip install -e ".[data]"
-  python -m tri.prepare_data --mix reason --out-dir data --max-tokens 34000000000  # once, ~hours
-  gsutil -m rsync -r data/ gs://$PROJECT-tri/data/
+  GCS_BUCKET=gs://$PROJECT-tri bash scripts/prep_to_gcs.sh     # once, ~hours; resumable
   GCS_BUCKET=gs://$PROJECT-tri bash scripts/tpu_bootstrap.sh   # starts training in tmux
 ```
+
+Data prep is hours of work that a spot preemption would otherwise throw away wholesale, so
+`prep_to_gcs.sh` writes the corpus in ~1.25B-token shards, mirrors progress to GCS every five
+minutes, and resumes from the manifest when re-run — a preemption costs one re-run command and the
+stream-skip back to position, not the night.  If you'd rather remove the risk entirely, run the same
+script on a cheap **on-demand** e2 CPU VM in the bucket's region (tokenization is CPU/network-bound;
+an e2-standard-32 does the whole job for a few dollars and cannot be preempted), then delete it.
 
 From then on `scripts/tpu_babysit.sh` (run it anywhere gcloud lives and stays up — Cloud Shell
 works) recreates the TPU after each preemption and re-runs the bootstrap, which pulls the newest

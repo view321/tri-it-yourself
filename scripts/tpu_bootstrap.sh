@@ -20,7 +20,11 @@ python -c "import jax; assert jax.devices()[0].platform == 'tpu', jax.devices()"
 
 # Tokens + tokenizer down (no-op when already present and unchanged).
 mkdir -p data runs
-gsutil -m rsync -r "${GCS_BUCKET:?set GCS_BUCKET}/data/" data/
+if ! gsutil -q stat "${GCS_BUCKET:?set GCS_BUCKET}/data/train.bin"; then
+  echo "no train.bin under $GCS_BUCKET/data - run scripts/prep_to_gcs.sh first" >&2
+  exit 1
+fi
+gsutil -m rsync -x 'train_part.*' -r "$GCS_BUCKET/data/" data/
 # Checkpoints down so --resume auto finds the newest surviving state.
 gsutil -m rsync -r "$GCS_BUCKET/runs/" runs/ || true
 
