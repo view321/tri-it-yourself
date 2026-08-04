@@ -142,7 +142,6 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
         # reason to exclude the short-memory end; b2=0 simply means "no memory".
         # An earlier 0.9 floor had the winners pinned against it.
         "sign_b2": trial.suggest_float("sign_b2", 0.0, 0.999, log=False),
-        "sign_normalize": trial.suggest_categorical("sign_normalize", ["rms", "absmean"]),
         "sign_precondition": trial.suggest_categorical("sign_precondition", ["none", "orthogonal"]),
         # No muon_lr here.  In `sign` mode every block linear is ternary, so the
         # Muon group is empty and muon_lr cannot affect the objective - an
@@ -150,6 +149,14 @@ def _sign_space(trial, fix_rule: str | None = None) -> dict:
         # a parameter with no effect.
         "adam_lr": trial.suggest_float("adam_lr", 3e-4, 2e-2, log=True),
     }
+    # `normalize` only executes on the non-orthogonal path: with orthogonal
+    # preconditioning every 2D tensor (i.e. every sign-group param) is
+    # Newton-Schulz-whitened and then rms-rescaled, so the knob is inert - an
+    # ef study searched it anyway and its winners split on it at random.
+    if space["sign_precondition"] == "none":
+        space["sign_normalize"] = trial.suggest_categorical(
+            "sign_normalize", ["rms", "absmean"]
+        )
     if rule == "bop":
         # bop flips when eta*|u| > threshold, so eta and threshold are
         # degenerate: only their ratio changes behaviour, and searching both
