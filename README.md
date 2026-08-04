@@ -154,6 +154,37 @@ directory and starts fresh if there isn't one, so it is safe as a restart loop. 
 - `final.npz` stays params-only (that's what `tri.sample` reads). The resumable state lives in
   `ckpt_*.npz`, which are correspondingly larger.
 
+### The spot pipeline (`scripts/tpu_*.sh`)
+
+Spot preemption deletes the whole TPU VM, so everything durable lives in GCS and every piece of the
+loop is restartable. Checkpoint writes are atomic (tmp + rename), which makes the 5-minute GCS
+mirror safe: it can only ever copy a complete file.
+
+```bash
+gsutil mb -l us-east1 gs://$PROJECT-tri          # once; same region as the TPU
+bash scripts/tpu_create_spot.sh                  # spot v6e-1 (see tpu_env.sh for knobs)
+gcloud compute tpus tpu-vm ssh tri-spot --zone=us-east1-d      # then, on the VM:
+  git clone https://github.com/view321/tri-it-yourself && cd tri-it-yourself
+  pip install -U "jax[tpu]" && pip install -e ".[data]"
+  python -m tri.prepare_data --mix reason --out-dir data --max-tokens 34000000000  # once, ~hours
+  gsutil -m rsync -r data/ gs://$PROJECT-tri/data/
+  GCS_BUCKET=gs://$PROJECT-tri bash scripts/tpu_bootstrap.sh   # starts training in tmux
+```
+
+From then on `scripts/tpu_babysit.sh` (run it anywhere gcloud lives and stays up — Cloud Shell
+works) recreates the TPU after each preemption and re-runs the bootstrap, which pulls the newest
+checkpoint from GCS and resumes exactly. Spot prices differ several-fold by region — at the time of
+writing v6e was $0.65/chip-hour in us-east1/us-central1 against $1.40 in us-east5 and $1.78 in
+europe-west4 - so check the Billing Catalog before picking a zone.
+
+The `reason` preset is sized for this pipeline on a ~240 EUR budget: ~523M stored params (455M
+ternary — a 114 MB packed deployment), ~1.03B compute-equivalent at 3 loops, 33B tokens of the
+`reason` mix (45% FineWeb-Edu, 25% FineMath, 20% Python, 10% Cosmopedia, digit-split BPE). At the
+us-east1 spot rate that is ~$230 assuming a pessimistic 20% MFU, and margin appears if MFU is
+better. **Watch the logged `mfu` in the first hour**: if it sits under ~18%, stop early (a restart
+at step 2k costs cents) and relaunch with fewer steps — schedules are built from `total_steps`, so
+shortening a run mid-flight is not an option but restarting a young one is cheap.
+
 ## Running on a TPU instead
 
 JAX is native on TPU and nothing here is CUDA-specific, so a single-chip VM works with no code

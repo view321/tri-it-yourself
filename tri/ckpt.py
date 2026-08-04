@@ -33,7 +33,12 @@ def _is_ternary(v: np.ndarray) -> bool:
 
 
 def save(path: str, tree, pack: bool = True, extra: dict | None = None) -> str:
-    """Save a pytree by leaf path.  Ternary leaves are bit-packed when ``pack``."""
+    """Save a pytree by leaf path.  Ternary leaves are bit-packed when ``pack``.
+
+    The write is atomic (tmp file + rename): a preemption mid-save must leave
+    either the previous checkpoint or the new one, never a truncated file that
+    ``--resume auto`` would then try to load.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     leaves = jax.tree_util.tree_leaves(tree)
     keys = _keys(tree)
@@ -47,7 +52,10 @@ def save(path: str, tree, pack: bool = True, extra: dict | None = None) -> str:
             arrays[k] = v
             meta[k] = {"shape": list(v.shape), "dtype": str(v.dtype), "packed": False}
     payload = {"__meta__": json.dumps({"leaves": meta, "extra": extra or {}})}
-    np.savez(path, **payload, **arrays)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        np.savez(fh, **payload, **arrays)
+    os.replace(tmp, path)
     return path
 
 

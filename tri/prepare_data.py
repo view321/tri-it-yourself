@@ -1,7 +1,15 @@
 """Tokenize a corpus into flat uint16 .bin shards.
 
 Default is the FineWeb-Edu 10BT sample with a 32k byte-level BPE trained on a
-slice of it.
+slice of it.  ``--mix`` instead interleaves several sources by weight - the
+named ``reason`` mix (educational web + FineMath + Python + synthetic
+textbooks) is the one the `reason` preset is meant to train on.  A mix run
+also writes one ``val_<tag>.bin`` per source next to the combined ``val.bin``,
+so per-domain loss can be measured after (or during) training.
+
+New tokenizers split numbers into individual digits (`Digits` pre-tokenizer),
+which is a cheap, well-established win for arithmetic; an existing
+``tokenizer.json`` is loaded as-is, so already-tokenized corpora stay valid.
 
 Sizing note: the `main` run consumes 12000 steps x 524288 tokens = 6.3B, so the
 8B default leaves headroom.  Ablations need far less - a `tiny` trial is 800
@@ -14,6 +22,7 @@ builds; there is no reason to hold an accelerator idle waiting for 8B tokens.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 
@@ -53,12 +62,118 @@ def preflight(tokenizer: str) -> None:
         )
 
 
-def _train_bpe(texts, vocab_size: int, out_path: str):
-    from tokenizers import ByteLevelBPETokenizer
+# -- weighted mixes ----------------------------------------------------
+#
+# (tag, dataset, config, text_key, weight).  A config of ``dir:x`` selects a
+# subdirectory (``data_dir``) instead of a named config.  Every source here
+# streams with its text inline and loads without a dataset script - that
+# rules out more sets than you would expect: python-edu and stack-edu only
+# hold blob ids pointing at S3, and github-code-clean needs a loading script
+# that `datasets` >= 3 refuses to run.
+MIXES: dict[str, list[tuple[str, str, str | None, str, float]]] = {
+    # Aimed at math / code / reasoning: educational web keeps general language
+    # ability, FineMath and Python carry the target skills, and a slice of
+    # synthetic textbooks adds clean expository structure.  If you have an HF
+    # token and have accepted the StarCoder terms, swapping the code entry for
+    #   code=bigcode/starcoderdata:dir:python:content:0.20
+    # buys stronger license/quality filtering at the same weight.
+    "reason": [
+        ("web", "HuggingFaceFW/fineweb-edu", "sample-100BT", "text", 0.45),
+        ("math", "HuggingFaceTB/finemath", "finemath-3plus", "text", 0.25),
+        ("code", "codeparrot/codeparrot-clean", None, "content", 0.20),
+        ("synth", "HuggingFaceTB/smollm-corpus", "cosmopedia-v2", "text", 0.10),
+    ],
+}
 
-    tok = ByteLevelBPETokenizer()
-    tok.train_from_iterator(texts, vocab_size=vocab_size, min_frequency=2,
-                            special_tokens=["<|endoftext|>"])
+
+def parse_mix(spec: str) -> list[tuple[str, str, str | None, str, float]]:
+    """``reason`` or ``tag=dataset:config:text_key:weight,...`` -> normalized specs.
+
+    ``config`` may itself contain a colon (``dir:python``), so the entry is
+    parsed from both ends: dataset first, weight and text_key last.
+    """
+    if spec in MIXES:
+        entries = MIXES[spec]
+    else:
+        entries = []
+        for part in spec.split(","):
+            try:
+                tag, rest = part.split("=", 1)
+                fields = rest.split(":")
+                ds, key, w = fields[0], fields[-2], float(fields[-1])
+                cfg = ":".join(fields[1:-2])
+            except (ValueError, IndexError):
+                raise SystemExit(
+                    f"bad mix entry {part!r}; want tag=dataset:config:text_key:weight "
+                    "(empty config allowed, dir:x selects a subdirectory), or a "
+                    "named mix: " + ", ".join(MIXES)
+                )
+            entries.append((tag.strip(), ds, cfg or None, key, w))
+    total = sum(w for *_, w in entries)
+    return [(t, d, c, k, w / total) for t, d, c, k, w in entries]
+
+
+def _open_stream(dataset: str, config: str | None, split: str):
+    from datasets import load_dataset
+
+    kw: dict = {}
+    if config and config.startswith("dir:"):
+        kw["data_dir"] = config[4:]
+    elif config:
+        kw["name"] = config
+    return load_dataset(dataset, split=split, streaming=True, **kw)
+
+
+def _source_stream(dataset: str, config: str | None, split: str, key: str, skip: int = 0):
+    """Yield document texts from one streaming source."""
+    ds = _open_stream(dataset, config, split)
+    if skip:
+        ds = ds.skip(skip)
+    for rec in ds:
+        yield rec[key]
+
+
+def _mix_stream(specs, split: str, skips: dict[str, int] | None = None, seed: int = 0):
+    """Interleave the sources by weight into one text stream."""
+    from datasets import interleave_datasets
+
+    skips = skips or {}
+    streams = []
+    for tag, dataset, config, key, _w in specs:
+        d = _open_stream(dataset, config, split)
+        if skips.get(tag):
+            d = d.skip(skips[tag])
+        d = d.select_columns([key])
+        if key != "text":
+            d = d.rename_column(key, "text")
+        streams.append(d)
+    mixed = interleave_datasets(
+        streams, probabilities=[w for *_, w in specs], seed=seed
+    )
+    for rec in mixed:
+        yield rec["text"]
+
+
+def _train_bpe(texts, vocab_size: int, out_path: str):
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    tok = Tokenizer(models.BPE())
+    # Individual digits keep arithmetic learnable: "2048" becomes four tokens
+    # with stable meanings instead of one opaque one.
+    tok.pre_tokenizer = pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Digits(individual_digits=True),
+            pre_tokenizers.ByteLevel(add_prefix_space=False),
+        ]
+    )
+    tok.decoder = decoders.ByteLevel()
+    trainer = trainers.BpeTrainer(
+        vocab_size=vocab_size,
+        min_frequency=2,
+        special_tokens=["<|endoftext|>"],
+        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+    )
+    tok.train_from_iterator(texts, trainer)
     tok.save(out_path)
     return tok
 
@@ -101,12 +216,75 @@ def _load_tokenizer(kind: str, vocab_size: int, data_dir: str, sample_texts=None
     return encode_batch, tok.get_vocab_size()
 
 
-def main(argv=None):
+def _write_bin(texts, encode_batch, path: str, max_tokens: int, batch_docs: int,
+               label: str) -> tuple[int, int]:
+    """Tokenize a text stream into ``path`` until ``max_tokens``.
+
+    Returns ``(tokens_written, docs_consumed)``.  ``docs_consumed`` counts every
+    document pulled from the iterator (a partial batch pending at the stop
+    point is dropped, not written), so a later stream may ``skip`` that many
+    documents without ever overlapping this file.
+    """
+    written = 0
+    docs = 0
+    buf: list[int] = []
+    batch: list[str] = []
+    t0 = time.time()
+    next_report = 100_000_000
+
+    def flush(f):
+        nonlocal written, buf
+        np.asarray(buf, np.uint16).tofile(f)
+        written += len(buf)
+        buf = []
+
+    with open(path, "wb") as f:
+        for text in texts:
+            batch.append(text)
+            docs += 1
+            if len(batch) < batch_docs:
+                continue
+            for ids in encode_batch(batch):
+                buf.extend(ids)
+            batch = []
+            if len(buf) >= min(4_000_000, max_tokens - written):
+                # A capped write lands the file on max_tokens exactly instead
+                # of overshooting by up to a whole buffer, which matters for
+                # the small weighted val bins.
+                if written + len(buf) > max_tokens:
+                    buf = buf[: max_tokens - written]
+                flush(f)
+                if written >= next_report:
+                    rate = written / max(time.time() - t0, 1e-9)
+                    left = max(max_tokens - written, 0) / max(rate, 1e-9)
+                    print(
+                        f"  [{label}] {written/1e9:.2f}B / {max_tokens/1e9:.2f}B tokens "
+                        f"| {rate/1e6:.1f}M tok/s | ~{left/3600:.1f}h left",
+                        flush=True,
+                    )
+                    next_report += 100_000_000
+                if written >= max_tokens:
+                    break
+        else:  # stream exhausted before the budget: keep the tail
+            if batch:
+                for ids in encode_batch(batch):
+                    buf.extend(ids)
+        if buf and written < max_tokens:
+            buf = buf[: max_tokens - written]
+            flush(f)
+    print(f"  [{label}] {written:,} tokens, {docs:,} docs -> {path}", flush=True)
+    return written, docs
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Build train.bin / val.bin")
     ap.add_argument("--dataset", default="HuggingFaceFW/fineweb-edu")
     ap.add_argument("--name", default="sample-10BT")
     ap.add_argument("--split", default="train")
     ap.add_argument("--text-key", default="text")
+    ap.add_argument("--mix", default=None,
+                    help="named mix (" + ", ".join(MIXES) + ") or "
+                         "tag=dataset:config:text_key:weight,...; overrides --dataset")
     ap.add_argument("--out-dir", default="data")
     ap.add_argument("--tokenizer", default="bpe32k", choices=["bpe32k", "gpt2"])
     ap.add_argument("--vocab-size", type=int, default=32768)
@@ -117,20 +295,28 @@ def main(argv=None):
     ap.add_argument("--batch-docs", type=int, default=1000,
                     help="documents per encode_batch call")
     ap.add_argument("--threads", type=int, default=0, help="0 = all cores")
-    args = ap.parse_args(argv)
+    ap.add_argument("--seed", type=int, default=0, help="mix interleaving seed")
+    return ap
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
 
     preflight(args.tokenizer)
-    from datasets import load_dataset
-
     os.makedirs(args.out_dir, exist_ok=True)
-    ds = load_dataset(args.dataset, name=args.name or None, split=args.split, streaming=True)
+    specs = parse_mix(args.mix) if args.mix else None
+
+    def fresh_texts():
+        if specs:
+            return _mix_stream(specs, args.split, seed=args.seed)
+        return _source_stream(args.dataset, args.name, args.split, args.text_key)
 
     sample = None
     if args.tokenizer == "bpe32k" and not os.path.exists(
         os.path.join(args.out_dir, "tokenizer.json")
     ):
         print(f"collecting {args.bpe_train_docs:,} docs to train the tokenizer...", flush=True)
-        sample = [r[args.text_key] for _, r in zip(range(args.bpe_train_docs), ds)]
+        sample = [t for _, t in zip(range(args.bpe_train_docs), fresh_texts())]
     encode_batch, vocab = _load_tokenizer(
         args.tokenizer, args.vocab_size, args.out_dir, sample, args.threads
     )
@@ -141,65 +327,59 @@ def main(argv=None):
 
     val_path = os.path.join(args.out_dir, "val.bin")
     train_path = os.path.join(args.out_dir, "train.bin")
-    written = {"val": 0, "train": 0}
-    buf: list[int] = []
-    docs: list[str] = []
-    f = open(val_path, "wb")
-    phase = "val"
-    t0 = time.time()
-    next_report = 100_000_000
+    t_start = time.time()
 
-    def flush_tokens():
-        nonlocal buf
-        if buf:
-            np.asarray(buf, np.uint16).tofile(f)
-            written[phase] += len(buf)
-            buf = []
-
-    def report():
-        nonlocal next_report
-        if written["train"] >= next_report:
-            dt = time.time() - t0
-            rate = written["train"] / max(dt, 1e-9)
-            left = max(args.max_tokens - written["train"], 0) / max(rate, 1e-9)
-            print(
-                f"  {written['train']/1e9:.2f}B / {args.max_tokens/1e9:.2f}B train tokens "
-                f"| {rate/1e6:.1f}M tok/s | ~{left/3600:.1f}h left",
-                flush=True,
+    if not specs:
+        # Single source, single pass: val is the head of the stream, train the rest.
+        texts = fresh_texts()
+        n_val, _ = _write_bin(texts, encode_batch, val_path, args.val_tokens,
+                              args.batch_docs, "val")
+        n_train, _ = _write_bin(texts, encode_batch, train_path, args.max_tokens,
+                                args.batch_docs, "train")
+    else:
+        # Per-source val bins first (so per-domain loss is measurable later),
+        # then the combined val.bin, then the interleaved train stream with
+        # each source skipping the documents its val bin consumed.
+        skips: dict[str, int] = {}
+        n_val = 0
+        val_parts = []
+        for tag, dataset, config, key, w in specs:
+            part = os.path.join(args.out_dir, f"val_{tag}.bin")
+            tokens, docs = _write_bin(
+                _source_stream(dataset, config, args.split, key),
+                encode_batch, part, max(1, int(args.val_tokens * w)),
+                args.batch_docs, f"val:{tag}",
             )
-            next_report += 100_000_000
+            skips[tag] = docs
+            n_val += tokens
+            val_parts.append(part)
+        with open(val_path, "wb") as out:
+            for part in val_parts:
+                with open(part, "rb") as g:
+                    out.write(g.read())
+        print(f"  [val] combined {n_val:,} tokens -> {val_path}", flush=True)
 
-    stop = False
-    for rec in ds:
-        docs.append(rec[args.text_key])
-        if len(docs) < args.batch_docs:
-            continue
-        for ids in encode_batch(docs):
-            buf.extend(ids)
-        docs = []
-        if len(buf) >= 4_000_000:
-            flush_tokens()
-            if phase == "val" and written["val"] >= args.val_tokens:
-                f.close()
-                f = open(train_path, "wb")
-                phase = "train"
-                t0 = time.time()
-                print(f"val.bin done ({written['val']:,} tokens); writing train.bin", flush=True)
-            elif phase == "train":
-                report()
-                if written["train"] >= args.max_tokens:
-                    stop = True
-        if stop:
-            break
+        n_train, _ = _write_bin(
+            _mix_stream(specs, args.split, skips, seed=args.seed),
+            encode_batch, train_path, args.max_tokens, args.batch_docs, "train",
+        )
+        manifest = {
+            "mix": args.mix,
+            "specs": [
+                {"tag": t, "dataset": d, "config": c, "text_key": k, "weight": w}
+                for t, d, c, k, w in specs
+            ],
+            "val_docs_skipped": skips,
+            "train_tokens": n_train,
+            "val_tokens": n_val,
+            "seed": args.seed,
+        }
+        with open(os.path.join(args.out_dir, "mix_manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=2)
 
-    if docs and not stop:
-        for ids in encode_batch(docs):
-            buf.extend(ids)
-    flush_tokens()
-    f.close()
     print(
-        f"done in {(time.time() - t0)/60:.1f} min: {written['train']:,} train tokens, "
-        f"{written['val']:,} val tokens in {args.out_dir}",
+        f"done in {(time.time() - t_start)/60:.1f} min: {n_train:,} train tokens, "
+        f"{n_val:,} val tokens in {args.out_dir}",
         flush=True,
     )
 

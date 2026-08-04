@@ -125,6 +125,8 @@ def test_checkpoint_rotation_keeps_only_the_newest(tmp_path):
     run_dir = os.path.join(str(tmp_path), "rot")
     kept = sorted(f for f in os.listdir(run_dir) if f.startswith("ckpt_"))
     assert kept == ["ckpt_0000006.npz", "ckpt_0000009.npz"]
+    # atomic writes must not leave partial temp files behind
+    assert not [f for f in os.listdir(run_dir) if f.endswith(".tmp")]
 
 
 def test_keep_all_when_keep_last_is_zero(tmp_path):

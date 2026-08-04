@@ -271,6 +271,25 @@ PRESETS: dict[str, dict] = {
             dataset="bin", device_tflops=918.0,
         ),
     ),
+    # Sized for a ~240 EUR spot-v6e-1 budget (~400 chip-hours at the us-east1
+    # spot rate).  ~525M stored params, ~1.03B compute-equivalent at 3 loops;
+    # 63k steps x 0.5M tokens = 33B tokens (~63 tokens per stored param).  The
+    # target budget assumes ~20% MFU, so a healthier 30% finishes in ~2/3 of
+    # the hours and the remainder is margin for preemptions - schedules are
+    # built from total_steps, so plan the step count you can afford at the
+    # pessimistic rate rather than extending a finished run.  Meant to train
+    # on the `reason` data mix (see tri.prepare_data --mix reason).
+    "reason": dict(
+        model=dict(
+            vocab_size=32768, d_model=2048, n_heads=16, n_prelude=2, n_core=5,
+            n_coda=2, n_loops=3, seq_len=2048,
+        ),
+        train=dict(
+            batch_size=16, grad_accum=16, total_steps=63000, eval_every=1000,
+            eval_batches=40, ckpt_every=500, keep_last=2, loop_lo=2, loop_hi=4,
+            dataset="bin", device_tflops=918.0,
+        ),
+    ),
     # The recommended 2-day run on a single 32GB card.
     "main": dict(
         model=dict(
