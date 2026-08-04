@@ -441,6 +441,11 @@ tri/prepare_data.py, tri/sample.py
   Fixes SignSGD* (2019) — the error-feedback lineage behind the `ef` rule; Courbariaux et al.,
   *BinaryConnect* (2015) for clipping the latent to keep it responsive, which is what bounds the
   residual to one cell.
+- *ECO: Quantized Training without Full-Precision Master Weights* (2026, arXiv:2601.22101) — the
+  same master-weight-free error-feedback idea, developed independently and concurrently at fp8/int4;
+  ECO folds the quantization error into the optimizer momentum, where `ef` keeps a dedicated bounded
+  residual — at 2-bit lattices the error is up to half a cell, and a decaying momentum buffer would
+  leak it.
 - Jordan et al., *Muon: An optimizer for hidden layers in neural networks* (2024).
 - Geiping et al., *Scaling up Test-Time Compute with Latent Reasoning* (2025) — looped depth with
   embedding re-injection.
