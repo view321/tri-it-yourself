@@ -351,8 +351,12 @@ def _write_train_sharded(make_stream, encode_batch, out_dir: str, max_tokens: in
         target = min(shard_tokens, max_tokens - tokens_done)
         name = f"train_part{len(parts):04d}.bin"
         path = os.path.join(out_dir, name)
+        # Parts are written under a temp name and renamed on completion, so a
+        # concurrent GCS mirror only ever sees finished, immutable part files
+        # (uploading a still-growing file aborts with a size-changed error).
+        tmp = path + ".writing"
         written = 0
-        with open(path, "wb") as f:
+        with open(tmp, "wb") as f:
             while written < target:
                 while not exhausted and len(buf) < min(4_000_000, target - written):
                     try:
@@ -381,12 +385,13 @@ def _write_train_sharded(make_stream, encode_batch, out_dir: str, max_tokens: in
                     )
                     next_report += 100_000_000
         if written:
+            os.replace(tmp, path)
             parts.append({"file": name, "tokens": written, "docs": docs})
             save_manifest()
             print(f"  [train] {name} done ({written:,} tokens, {docs:,} docs total)",
                   flush=True)
         else:
-            os.remove(path)
+            os.remove(tmp)
     manifest["train_tokens"] = tokens_done
     manifest["complete"] = True
     save_manifest()

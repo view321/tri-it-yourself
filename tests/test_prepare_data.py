@@ -93,6 +93,8 @@ def test_sharded_write_sizes_and_cumulative_docs(tmp_path):
     assert [p["tokens"] for p in manifest["parts"]] == [100, 100, 50]
     assert [p["docs"] for p in manifest["parts"]] == [10, 20, 26]
     assert manifest["complete"]
+    # parts are renamed into place on completion; nothing in-flight remains
+    assert not [f for f in os.listdir(str(tmp_path)) if f.endswith(".writing")]
 
 
 def test_resume_continues_identically(tmp_path):

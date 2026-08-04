@@ -20,7 +20,7 @@ mkdir -p data
 echo "pulling any previous progress from $GCS_BUCKET/data/ ..."
 gsutil -m -q rsync -r "$GCS_BUCKET/data/" data/ 2>/dev/null || true
 
-( while true; do sleep 300; gsutil -m -q rsync -r data/ "$GCS_BUCKET/data/" || true; done ) &
+( while true; do sleep 300; gsutil -m -q rsync -x '.*\.(writing|tmp)$' -r data/ "$GCS_BUCKET/data/" || true; done ) &
 SYNC_PID=$!
 trap 'kill "$SYNC_PID" 2>/dev/null' EXIT
 
